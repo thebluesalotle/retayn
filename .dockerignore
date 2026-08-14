@@ -1,0 +1,10 @@
+.env
+data/
+recovery_uploads/
+sessions/
+*.db
+*.db-*
+*.session*
+*.pem
+__pycache__/
+*.pyc
