@@ -6,3 +6,4 @@ httpx>=0.28,<1
 cryptography>=45,<46
 google-auth>=2.40,<3
 telethon>=1.44,<2
+requests>=2.32,<3
