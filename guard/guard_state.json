@@ -1,0 +1,243 @@
+{
+  "created_at": "2026-08-11T12:34:05+00:00",
+  "events": [
+    {
+      "action": "alert",
+      "current": true,
+      "enforced": false,
+      "hash": "0",
+      "reasons": [
+        "new Telegram authorization",
+        "country is outside allowed list: Dubai, United Arab Emirates",
+        "client is not marked as an official Telegram app"
+      ],
+      "session": {
+        "api_id": 26257569,
+        "app_name": "ai bot",
+        "app_version": "0.1.0",
+        "country": "Dubai, United Arab Emirates",
+        "current": true,
+        "date_active": "2026-08-11T12:34:38+00:00",
+        "date_created": "2026-08-11T12:34:38+00:00",
+        "device_model": "Retayn Telegram Guard",
+        "hash": "0",
+        "ip": "",
+        "official_app": false,
+        "password_pending": false,
+        "platform": "Desktop",
+        "region": "",
+        "system_version": "10",
+        "unconfirmed": false
+      },
+      "time": "2026-08-11T12:34:40+00:00"
+    },
+    {
+      "action": "alert",
+      "current": false,
+      "enforced": false,
+      "hash": "2886284645645511892",
+      "reasons": [
+        "new Telegram authorization",
+        "country is outside allowed list: Dubai, United Arab Emirates"
+      ],
+      "session": {
+        "api_id": 6,
+        "app_name": "Telegram Android",
+        "app_version": "12.9.1",
+        "country": "Dubai, United Arab Emirates",
+        "current": false,
+        "date_active": "2026-08-11T12:27:30+00:00",
+        "date_created": "2025-05-02T12:53:56+00:00",
+        "device_model": "Samsung Galaxy Note20 Ultra 5G",
+        "hash": "2886284645645511892",
+        "ip": "",
+        "official_app": true,
+        "password_pending": false,
+        "platform": "Android",
+        "region": "",
+        "system_version": "13 (33)",
+        "unconfirmed": false
+      },
+      "time": "2026-08-11T12:34:40+00:00"
+    },
+    {
+      "action": "alert",
+      "current": false,
+      "enforced": false,
+      "hash": "-8590634833853995955",
+      "reasons": [
+        "new Telegram authorization",
+        "country is outside allowed list: Bangkok, Thailand",
+        "client is not marked as an official Telegram app"
+      ],
+      "session": {
+        "api_id": 26257569,
+        "app_name": "ai bot",
+        "app_version": "1.44.0",
+        "country": "Bangkok, Thailand",
+        "current": false,
+        "date_active": "2026-07-23T03:04:24+00:00",
+        "date_created": "2026-07-21T05:05:11+00:00",
+        "device_model": "PC 64bit",
+        "hash": "-8590634833853995955",
+        "ip": "",
+        "official_app": false,
+        "password_pending": false,
+        "platform": "Desktop",
+        "region": "",
+        "system_version": "10",
+        "unconfirmed": false
+      },
+      "time": "2026-08-11T12:34:41+00:00"
+    },
+    {
+      "action": "alert",
+      "current": true,
+      "enforced": false,
+      "hash": "0",
+      "reasons": [
+        "country is outside allowed list: Dubai, United Arab Emirates",
+        "client is not marked as an official Telegram app"
+      ],
+      "session": {
+        "api_id": 26257569,
+        "app_name": "ai bot",
+        "app_version": "0.1.0",
+        "country": "Dubai, United Arab Emirates",
+        "current": true,
+        "date_active": "2026-08-11T12:34:38+00:00",
+        "date_created": "2026-08-11T12:34:38+00:00",
+        "device_model": "Retayn Telegram Guard",
+        "hash": "0",
+        "ip": "",
+        "official_app": false,
+        "password_pending": false,
+        "platform": "Desktop",
+        "region": "",
+        "system_version": "10",
+        "unconfirmed": false
+      },
+      "time": "2026-08-11T12:35:11+00:00"
+    },
+    {
+      "action": "alert",
+      "current": false,
+      "enforced": false,
+      "hash": "2886284645645511892",
+      "reasons": [
+        "country is outside allowed list: Dubai, United Arab Emirates"
+      ],
+      "session": {
+        "api_id": 6,
+        "app_name": "Telegram Android",
+        "app_version": "12.9.1",
+        "country": "Dubai, United Arab Emirates",
+        "current": false,
+        "date_active": "2026-08-11T12:27:30+00:00",
+        "date_created": "2025-05-02T12:53:56+00:00",
+        "device_model": "Samsung Galaxy Note20 Ultra 5G",
+        "hash": "2886284645645511892",
+        "ip": "",
+        "official_app": true,
+        "password_pending": false,
+        "platform": "Android",
+        "region": "",
+        "system_version": "13 (33)",
+        "unconfirmed": false
+      },
+      "time": "2026-08-11T12:35:12+00:00"
+    },
+    {
+      "action": "alert",
+      "current": false,
+      "enforced": false,
+      "hash": "-8590634833853995955",
+      "reasons": [
+        "country is outside allowed list: Bangkok, Thailand",
+        "client is not marked as an official Telegram app"
+      ],
+      "session": {
+        "api_id": 26257569,
+        "app_name": "ai bot",
+        "app_version": "1.44.0",
+        "country": "Bangkok, Thailand",
+        "current": false,
+        "date_active": "2026-07-23T03:04:24+00:00",
+        "date_created": "2026-07-21T05:05:11+00:00",
+        "device_model": "PC 64bit",
+        "hash": "-8590634833853995955",
+        "ip": "",
+        "official_app": false,
+        "password_pending": false,
+        "platform": "Desktop",
+        "region": "",
+        "system_version": "10",
+        "unconfirmed": false
+      },
+      "time": "2026-08-11T12:35:12+00:00"
+    }
+  ],
+  "known_sessions": {
+    "-8590634833853995955": {
+      "api_id": 26257569,
+      "app_name": "ai bot",
+      "app_version": "1.44.0",
+      "country": "Bangkok, Thailand",
+      "current": false,
+      "date_active": "2026-07-23T03:04:24+00:00",
+      "date_created": "2026-07-21T05:05:11+00:00",
+      "device_model": "PC 64bit",
+      "first_seen": "2026-08-11T12:34:41+00:00",
+      "hash": "-8590634833853995955",
+      "ip": "",
+      "last_seen": "2026-08-11T12:35:12+00:00",
+      "official_app": false,
+      "password_pending": false,
+      "platform": "Desktop",
+      "region": "",
+      "system_version": "10",
+      "unconfirmed": false
+    },
+    "0": {
+      "api_id": 26257569,
+      "app_name": "ai bot",
+      "app_version": "0.1.0",
+      "country": "Dubai, United Arab Emirates",
+      "current": true,
+      "date_active": "2026-08-11T12:34:38+00:00",
+      "date_created": "2026-08-11T12:34:38+00:00",
+      "device_model": "Retayn Telegram Guard",
+      "first_seen": "2026-08-11T12:34:40+00:00",
+      "hash": "0",
+      "ip": "",
+      "last_seen": "2026-08-11T12:35:12+00:00",
+      "official_app": false,
+      "password_pending": false,
+      "platform": "Desktop",
+      "region": "",
+      "system_version": "10",
+      "unconfirmed": false
+    },
+    "2886284645645511892": {
+      "api_id": 6,
+      "app_name": "Telegram Android",
+      "app_version": "12.9.1",
+      "country": "Dubai, United Arab Emirates",
+      "current": false,
+      "date_active": "2026-08-11T12:27:30+00:00",
+      "date_created": "2025-05-02T12:53:56+00:00",
+      "device_model": "Samsung Galaxy Note20 Ultra 5G",
+      "first_seen": "2026-08-11T12:34:41+00:00",
+      "hash": "2886284645645511892",
+      "ip": "",
+      "last_seen": "2026-08-11T12:35:12+00:00",
+      "official_app": true,
+      "password_pending": false,
+      "platform": "Android",
+      "region": "",
+      "system_version": "13 (33)",
+      "unconfirmed": false
+    }
+  },
+  "last_scan": "2026-08-11T12:35:12+00:00"
+}

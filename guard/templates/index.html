@@ -1,0 +1,418 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#07131d" />
+    <meta name="csrf-token" content="{{ csrf_token }}" />
+    <title>Retayn Guard</title>
+    <link rel="icon" href="/static/retaynlogologo.png" />
+    <link rel="stylesheet" href="/static/app.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" id="sidebar">
+        <a class="brand" href="#overview" aria-label="Retayn Guard overview">
+          <span class="brand-icon"><img src="/static/retaynlogologo.png" alt="" /></span>
+          <span class="brand-wordmark">
+            <img src="/static/retaynlogo.png" alt="Retayn" />
+          </span>
+          <span class="product-label">Guard</span>
+        </a>
+
+        <nav class="side-nav" aria-label="Primary navigation">
+          <button class="nav-item active" data-view="overview" type="button">
+            <span class="nav-symbol" aria-hidden="true">01</span>
+            <span><strong>Overview</strong><small>Live security posture</small></span>
+          </button>
+          <button class="nav-item" data-view="recover" type="button">
+            <span class="nav-symbol" aria-hidden="true">02</span>
+            <span><strong>Recover</strong><small>Restore lost access</small></span>
+          </button>
+          <button class="nav-item" data-view="protection" type="button">
+            <span class="nav-symbol" aria-hidden="true">03</span>
+            <span><strong>Protection map</strong><small>Critical systems</small></span>
+          </button>
+          <button class="nav-item" data-view="apps" type="button">
+            <span class="nav-symbol" aria-hidden="true">04</span>
+            <span><strong>My apps</strong><small>Connections &amp; rules</small></span>
+          </button>
+          <button class="nav-item" data-view="connect" type="button">
+            <span class="nav-symbol" aria-hidden="true">05</span>
+            <span><strong>Connect an app</strong><small>Add protection</small></span>
+          </button>
+        </nav>
+
+        <div class="sidebar-footer">
+          <div class="sidebar-status">
+            <span class="status-signal" aria-hidden="true"></span>
+            <div>
+              <span>Overall security</span>
+              <strong id="sidebarPosture">Loading</strong>
+            </div>
+          </div>
+          <p>Monitoring stays active while this app is running.</p>
+        </div>
+      </aside>
+
+      <main class="content">
+        <header class="topbar">
+          <button class="menu-button" id="menuButton" type="button" aria-label="Open navigation" aria-controls="sidebar" aria-expanded="false">
+            <span></span><span></span><span></span>
+          </button>
+          <div class="page-heading">
+            <span class="eyebrow" id="pageKicker">Command center</span>
+            <h1 id="pageTitle">Monitoring overview</h1>
+          </div>
+          <div class="topbar-actions">
+            <span class="live-monitor"><span aria-hidden="true"></span>Monitoring live</span>
+            <span class="signed-in-user">{{ user.name or user.email }}</span>
+            <form action="/auth/signout" method="post">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+              <button class="quiet-button" type="submit">Sign out</button>
+            </form>
+            <button class="icon-button" id="refreshButton" type="button" aria-label="Refresh dashboard" title="Refresh dashboard">
+              <span aria-hidden="true">&#8635;</span>
+            </button>
+          </div>
+        </header>
+
+        <div class="workspace">
+          <section class="view active" id="overviewView">
+            <section class="posture-board" aria-labelledby="postureTitle">
+              <div class="posture-primary">
+                <span class="section-label">Current posture</span>
+                <div class="posture-score-row">
+                  <strong id="securityScore">0</strong>
+                  <div>
+                    <h2 id="postureTitle">Your connected systems are being watched.</h2>
+                    <p>Retayn is comparing access, roles, settings, and critical resources against your approved baseline.</p>
+                  </div>
+                </div>
+                <div class="posture-track" aria-hidden="true"><span id="securityScoreBar"></span></div>
+              </div>
+              <div class="posture-metrics">
+                <article>
+                  <span>Needs attention</span>
+                  <strong id="openCount">0</strong>
+                  <small>pending alerts</small>
+                </article>
+                <article>
+                  <span>Coverage</span>
+                  <strong id="coverageCount">0/7</strong>
+                  <small>critical areas</small>
+                </article>
+                <article>
+                  <span>Fallback action</span>
+                  <strong id="autoActionState">Off</strong>
+                  <small>when alerts expire</small>
+                </article>
+              </div>
+            </section>
+
+            <section class="overview-layout">
+              <section class="panel events-panel">
+                <div class="panel-head">
+                  <div>
+                    <span class="section-label">Review queue</span>
+                    <h2>Pending notifications</h2>
+                  </div>
+                  <span class="status-pill danger">Needs review</span>
+                </div>
+                <div id="eventsList" class="events-list"></div>
+              </section>
+
+              <aside class="overview-rail">
+                <section class="panel connections-panel">
+                  <div class="panel-head">
+                    <div>
+                      <span class="section-label">Live connections</span>
+                      <h2>Connected apps</h2>
+                    </div>
+                    <button type="button" class="quiet-button" onclick="setView('apps')">Manage</button>
+                  </div>
+                  <div id="accountsList" class="accounts-list"></div>
+                  <button type="button" class="connect-shortcut" onclick="setView('connect')">
+                    <span aria-hidden="true">+</span> Connect another app
+                  </button>
+                </section>
+
+                <section class="panel coverage-panel">
+                  <div class="panel-head">
+                    <div>
+                      <span class="section-label">Control path</span>
+                      <h2>Protection coverage</h2>
+                    </div>
+                  </div>
+                  <div id="coverageStrip" class="coverage-strip"></div>
+                  <button type="button" class="text-button" onclick="setView('protection')">Open full protection map <span aria-hidden="true">&#8594;</span></button>
+                </section>
+              </aside>
+            </section>
+
+            <section class="panel recent-panel">
+              <div class="panel-head">
+                <div>
+                  <span class="section-label">Audit trail</span>
+                  <h2>Recent activity</h2>
+                </div>
+              </div>
+              <div id="recentList" class="recent-list"></div>
+            </section>
+          </section>
+
+          <section class="view" id="recoverView">
+            <section class="recovery-hero">
+              <div>
+                <span class="section-label">Access recovery</span>
+                <h2>Get control back with a documented outreach case.</h2>
+                <p>Give Retayn the facts, contacts, and ownership evidence. You approve the first message before an agent contacts anyone.</p>
+              </div>
+              <div class="recovery-hero-actions">
+                <button type="button" class="secondary" id="syncTelegramRecoveryButton">Sync Telegram replies</button>
+                <button type="button" id="newRecoveryCaseButton"><span aria-hidden="true">+</span> New recovery case</button>
+                <p class="form-note" id="telegramSyncNote"></p>
+              </div>
+            </section>
+
+            <section class="recovery-metrics" aria-label="Recovery case summary">
+              <article><span>All cases</span><strong id="recoveryTotal">0</strong></article>
+              <article><span>Active outreach</span><strong id="recoveryActive">0</strong></article>
+              <article><span>Needs you</span><strong id="recoveryNeedsOwner">0</strong></article>
+              <article><span>Recovered</span><strong id="recoveryComplete">0</strong></article>
+            </section>
+
+            <section class="recovery-layout">
+              <aside class="panel recovery-case-panel">
+                <div class="panel-head">
+                  <div><span class="section-label">Case files</span><h2>Recovery cases</h2></div>
+                </div>
+                <div id="recoveryCaseList" class="recovery-case-list"></div>
+              </aside>
+
+              <section class="recovery-workspace">
+                <section id="recoveryIntake" class="panel recovery-intake hidden">
+                  <div class="recovery-form-heading">
+                    <span class="section-label">New case</span>
+                    <h2>Tell Retayn exactly what happened.</h2>
+                    <p>Only information entered here or added later may be used by the recovery agent.</p>
+                  </div>
+                  <form id="recoveryCaseForm" class="recovery-form">
+                    <fieldset>
+                      <legend><span>01</span> Owner and account</legend>
+                      <div class="recovery-fields two-column">
+                        <label>Your full name<input name="owner_name" autocomplete="name" required /></label>
+                        <label>Your email<input name="owner_email" type="email" autocomplete="email" /></label>
+                        <label>Business or brand name<input name="business_name" autocomplete="organization" /></label>
+                        <label>Case title<input name="title" placeholder="Recover our App Store account" /></label>
+                        <label>What are you recovering?
+                          <select name="asset_type" required>
+                            <option value="">Choose one</option>
+                            <option>Source code or repository</option>
+                            <option>Developer or publisher account</option>
+                            <option>Website, hosting, or cloud account</option>
+                            <option>Domain or DNS</option>
+                            <option>Store or payment account</option>
+                            <option>Signing certificate or release key</option>
+                            <option>Build or release pipeline</option>
+                            <option>Social or creator account</option>
+                            <option>Other critical access</option>
+                          </select>
+                        </label>
+                        <label>Platform or company<input name="platform_name" placeholder="Apple Developer, GitHub, Shopify..." required /></label>
+                        <label class="full-field">Account name, URL, username, or identifier<input name="account_identifier" placeholder="Anything support can use to identify the account" /></label>
+                      </div>
+                    </fieldset>
+
+                    <fieldset>
+                      <legend><span>02</span> What happened</legend>
+                      <div class="recovery-fields two-column">
+                        <label class="full-field">What access are you trying to recover?<textarea name="recovery_goal" rows="4" placeholder="Be specific about the account, files, role, or release access you need." required></textarea></label>
+                        <label class="full-field">How did you get locked out?<textarea name="lockout_story" rows="6" placeholder="Explain who controlled it, what changed, and what you have already tried." required></textarea></label>
+                        <label>Approximate lockout date<input name="lockout_date" type="date" /></label>
+                        <label>Urgency
+                          <select name="urgency"><option value="normal">Normal</option><option value="high">High</option><option value="critical">Business stopped</option></select>
+                        </label>
+                        <label class="full-field">What proof of ownership do you have?<textarea name="ownership_proof" rows="5" placeholder="Invoices, contracts, receipts, company records, commits, emails, payment records, identity documents, or other proof."></textarea></label>
+                        <div class="full-field evidence-picker-panel">
+                          <div class="mini-section-head">
+                            <div>
+                              <strong>Attach ownership proof</strong>
+                              <span>Add a short label to each file so the agent knows exactly what it is.</span>
+                            </div>
+                            <button type="button" class="secondary" id="addRecoveryEvidenceFileButton"><span aria-hidden="true">+</span> Add file</button>
+                          </div>
+                          <div id="recoveryEvidenceFiles" class="evidence-file-rows"></div>
+                        </div>
+                        <label class="full-field">Anything else the agent must know?<textarea name="additional_context" rows="4"></textarea></label>
+                      </div>
+                    </fieldset>
+
+                    <fieldset>
+                      <legend><span>03</span> People to contact</legend>
+                      <p class="fieldset-copy">Add the publisher, platform support, developer, agency, host, registrar, billing owner, and anyone who may still have access.</p>
+                      <div id="recoveryContacts" class="recovery-contact-editor"></div>
+                      <button type="button" class="secondary" id="addRecoveryContactButton"><span aria-hidden="true">+</span> Add another contact</button>
+                    </fieldset>
+
+                    <fieldset>
+                      <legend><span>04</span> Agent rules</legend>
+                      <div class="recovery-fields">
+                        <label class="toggle-label"><input name="share_evidence_initially" type="checkbox" /> Attach evidence to the approved first message</label>
+                        <label class="toggle-label"><input name="auto_reply_generic" type="checkbox" checked /> Let the agent answer routine responses automatically</label>
+                      </div>
+                      <div class="truth-rule"><strong>Truth rule</strong><p>The agent may only use facts and files in this case. Requests for more proof always come back to you before anything is sent.</p></div>
+                    </fieldset>
+
+                    <div class="recovery-submit-row">
+                      <button type="submit">Create case and draft message</button>
+                      <button type="button" class="secondary" id="cancelRecoveryCaseButton">Cancel</button>
+                      <p class="form-note" id="recoveryFormNote"></p>
+                    </div>
+                  </form>
+                </section>
+
+                <section id="recoveryEmpty" class="panel recovery-empty">
+                  <img src="/static/retaynlogologo.png" alt="" />
+                  <span class="section-label">Ready when access is not</span>
+                  <h2>Start a recovery case.</h2>
+                  <p>Retayn will organize the facts, prepare the outreach, and keep every reply and file in one place.</p>
+                  <button type="button" onclick="showRecoveryIntake()">Create your first case</button>
+                </section>
+
+                <section id="recoveryCaseDetail" class="recovery-case-detail hidden"></section>
+              </section>
+            </section>
+          </section>
+
+          <section class="view" id="protectionView">
+            <section class="section-intro">
+              <div>
+                <span class="section-label">Code to production</span>
+                <h2>Critical system coverage</h2>
+                <p>This is your recovery checklist for accounts Retayn cannot connect to yet: app stores, domains, cloud, billing, certificates, and any handoff that could stop you from shipping.</p>
+              </div>
+              <div class="score-block">
+                <strong id="protectionScore">0</strong>
+                <span>security score</span>
+              </div>
+            </section>
+
+            <div id="protectionCategories" class="category-grid"></div>
+
+            <section class="protection-layout">
+              <section class="panel">
+                <div class="panel-head">
+                  <div>
+                    <span class="section-label">Recovery inventory</span>
+                    <h2>Tracked systems</h2>
+                  </div>
+                  <span class="status-pill" id="assetCount">0 recorded</span>
+                </div>
+                <div id="assetList" class="asset-list"></div>
+              </section>
+
+              <section class="panel asset-form-panel">
+                <div class="panel-head">
+                  <div>
+                    <span class="section-label">Add without connecting</span>
+                    <h2>Add a system to watch manually</h2>
+                  </div>
+                </div>
+                <form id="assetForm" class="asset-form">
+                  <label>Category<select name="category" id="assetCategory" required></select></label>
+                  <label>Provider<input name="provider" placeholder="Apple Developer, AWS, Cloudflare..." required /></label>
+                  <label>System or account name<input name="name" placeholder="Production account" required /></label>
+                  <label>Account URL<input name="url" type="url" placeholder="https://" /></label>
+                  <label>Criticality
+                    <select name="criticality">
+                      <option value="critical">Critical</option>
+                      <option value="high" selected>High</option>
+                      <option value="medium">Medium</option>
+                      <option value="low">Low</option>
+                    </select>
+                  </label>
+                  <label>People with control<textarea name="control_holders" rows="3" placeholder="One person or team per line"></textarea></label>
+                  <label>Recovery contact<input name="recovery_contact" placeholder="Owner or recovery email" /></label>
+                  <label>Recovery path<textarea name="recovery_method" rows="3" placeholder="Where recovery codes, backup admins, or escalation details are held"></textarea></label>
+                  <label>Independent backup
+                    <select name="backup_status">
+                      <option value="unknown">Not confirmed</option>
+                      <option value="independent">Independent backup exists</option>
+                      <option value="provider_only">Only provider backup</option>
+                      <option value="missing">No backup</option>
+                      <option value="not_applicable">Not applicable</option>
+                    </select>
+                  </label>
+                  <label>Notes<textarea name="notes" rows="3"></textarea></label>
+                  <button type="submit">Add to protection map</button>
+                  <p class="form-note" id="assetFormNote"></p>
+                </form>
+              </section>
+            </section>
+          </section>
+
+          <section class="view" id="appsView">
+            <section class="section-intro compact-intro">
+              <div>
+                <span class="section-label">Connected services</span>
+                <h2>Manage your apps</h2>
+                <p>Edit monitoring rules, trusted people, response timing, and the approved baseline for each connection.</p>
+              </div>
+              <button type="button" onclick="setView('connect')"><span aria-hidden="true">+</span> Connect an app</button>
+            </section>
+            <section class="app-management-layout">
+              <aside class="panel app-picker-panel">
+                <div class="panel-head">
+                  <div>
+                    <span class="section-label">Connections</span>
+                    <h2>My apps</h2>
+                  </div>
+                  <span class="status-pill">Manage</span>
+                </div>
+                <div id="manageAppsList" class="manage-list"></div>
+              </aside>
+              <section id="appDetail" class="app-detail panel hidden"></section>
+            </section>
+          </section>
+
+          <section class="view" id="connectView">
+            <section class="connect-heading">
+              <span class="section-label">New connection</span>
+              <h2>What should Retayn watch?</h2>
+              <p>Choose an app, enter the account or workspace, then authorize Retayn directly with the provider. Many more apps are coming soon.</p>
+            </section>
+            <section class="connect-layout">
+              <aside class="connect-steps" aria-label="Connection steps">
+                <div class="step active"><span>01</span><div><strong>Choose an app</strong><small>Select the service to monitor.</small></div></div>
+                <div class="step"><span>02</span><div><strong>Identify it</strong><small>Tell Retayn which account to connect.</small></div></div>
+                <div class="step"><span>03</span><div><strong>Authorize Retayn</strong><small>Approve access on the provider's site.</small></div></div>
+              </aside>
+              <section class="panel connect-panel">
+                <form id="connectForm" class="connect-form">
+                  <label class="provider-select">
+                    App
+                    <select name="connector" id="connectorSelect">
+                      <option value="github">GitHub</option>
+                    </select>
+                  </label>
+                  <div id="connectorSummary" class="connector-summary"></div>
+                  <div id="connectorFields" class="connect-form connector-fields"></div>
+                  <p class="coming-soon-copy">Many more business apps are coming to Retayn.</p>
+                  <div class="actions connect-actions">
+                    <button type="button" class="secondary" id="installAppButton">Open install</button>
+                    <button type="submit">Finish connection</button>
+                  </div>
+                </form>
+                <p class="form-note" id="formNote"></p>
+              </section>
+            </section>
+          </section>
+        </div>
+      </main>
+    </div>
+
+    <div class="mobile-scrim" id="mobileScrim"></div>
+    <script src="/static/app.js"></script>
+  </body>
+</html>
