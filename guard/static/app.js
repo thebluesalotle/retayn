@@ -536,6 +536,7 @@ function renderRecoveryCase(caseItem) {
         <div class="panel-head"><div><span class="section-label">Owner-approved outreach</span><h2>First message</h2></div><span class="truth-badge">Fact locked</span></div>
         <textarea id="recoveryDraftMessage" rows="13" ${reviewable ? "" : "disabled"}>${escapeHtml(caseItem.draft_message || "")}</textarea>
         <p class="draft-help">The AI draft is checked against this case. Edit anything you want before approval. Retayn will never start outreach without the button below.</p>
+        <p class="form-note" id="recoveryDraftStatus"></p>
         ${reviewable ? `<div class="actions"><button type="button" onclick="saveRecoveryDraft(event, ${caseItem.id})">Save changes</button><button type="button" class="secondary" onclick="regenerateRecoveryDraft(event, ${caseItem.id})">Regenerate from case facts</button><button type="button" class="safe" onclick="approveRecoveryOutreach(event, ${caseItem.id})">Approve and start outreach</button></div>` : `<div class="approved-banner"><span></span>Approved message locked after outreach began.</div>`}
       </section>
       <aside class="panel recovery-facts-panel">
@@ -725,9 +726,13 @@ async function regenerateRecoveryDraft(event, caseId) {
 }
 
 async function approveRecoveryOutreach(event, caseId) {
+  if (actionBusy) return;
   if (!confirm("Start recovery outreach now? Retayn will send the approved message through every configured channel. Channels without working credentials will be marked for setup or manual contact.")) return;
   const button = event.currentTarget;
-  setButtonLoading(button, "Starting outreach...");
+  actionBusy = true;
+  setButtonLoading(button, "Sending outreach...");
+  const status = $("#recoveryDraftStatus");
+  if (status) status.textContent = "Saving your approved message...";
   try {
     const saveResponse = await fetch(`/api/recovery/cases/${caseId}/draft`, {
       method: "POST",
@@ -735,14 +740,18 @@ async function approveRecoveryOutreach(event, caseId) {
       body: JSON.stringify({ message: $("#recoveryDraftMessage").value }),
     });
     if (!saveResponse.ok) {
-      const error = await saveResponse.json();
+      const error = await saveResponse.clone().json().catch(async () => ({ detail: await saveResponse.text().catch(() => "") }));
       throw new Error(error.detail || "Could not save the approved message.");
     }
+    if (status) status.textContent = "Sending the approved message to your recovery contacts...";
     const response = await fetch(`/api/recovery/cases/${caseId}/approve`, { method: "POST" });
     await refreshRecoveryCaseFromResponse(response);
+    if ($("#recoveryDraftStatus")) $("#recoveryDraftStatus").textContent = "Outreach started.";
   } catch (error) {
+    if (status) status.textContent = error.message;
     alert(error.message);
   } finally {
+    actionBusy = false;
     clearButtonLoading(button);
   }
 }
@@ -1223,8 +1232,16 @@ async function loadOverview() {
   const response = await fetch("/api/overview");
   const data = await response.json();
   lastData = data;
+  const persistenceWarning = $("#persistenceWarning");
+  if (data.persistence?.risky) {
+    persistenceWarning.innerHTML = `<strong>Storage is not persistent</strong>${escapeHtml(data.persistence.message || "Retayn data may be reset after deploy.")}`;
+    persistenceWarning.classList.remove("hidden");
+  } else {
+    persistenceWarning.classList.add("hidden");
+  }
   const hasSystems = Boolean(data.stats.has_systems);
   $("#securityScore").textContent = hasSystems ? data.stats.security_score : "--";
+  $("#securityScore").classList.toggle("score-empty", !hasSystems);
   $("#securityScoreBar").style.width = `${hasSystems ? Math.max(0, Math.min(100, Number(data.stats.security_score) || 0)) : 0}%`;
   $("#postureTitle").textContent = hasSystems ? "Your connected systems are being watched." : "Connect your first app.";
   $("#postureBody").textContent = hasSystems
