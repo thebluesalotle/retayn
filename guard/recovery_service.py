@@ -43,6 +43,7 @@ RECOVERY_STATUSES = {
 CONTACT_CHANNELS = {"email", "telegram", "whatsapp", "support_portal", "phone", "other"}
 RESPONSE_CLASSIFICATIONS = {
     "proof_request",
+    "account_info_request",
     "generic",
     "access_offer",
     "files_shared",
@@ -406,6 +407,16 @@ def sentence(value: str) -> str:
     return text if text.endswith((".", "!", "?")) else f"{text}."
 
 
+def natural_lockout_story(value: str) -> str:
+    text = clean_text(value, 5000)
+    lowered = text.casefold()
+    if lowered in {"i got hacked", "got hacked", "hacked"}:
+        return "I believe the account was compromised and I no longer have access"
+    if lowered in {"forgot password", "i forgot password", "i forgot my password"}:
+        return "I forgot my password and got locked out of the account"
+    return text
+
+
 def fallback_recovery_draft(case: dict[str, Any], contact: dict[str, Any] | None = None) -> str:
     name = clean_text((contact or {}).get("name")) or "Support team"
     role = clean_text((contact or {}).get("role")).casefold()
@@ -423,7 +434,7 @@ def fallback_recovery_draft(case: dict[str, Any], contact: dict[str, Any] | None
     if identifier:
         target += f", identified as {identifier}"
     developer_contact = any(term in role for term in ("developer", "engineer", "agency", "contractor", "freelancer", "admin"))
-    lockout = clean_text(case.get("lockout_story"))
+    lockout = natural_lockout_story(case.get("lockout_story"))
     goal = clean_text(case.get("recovery_goal"))
     proof = clean_text(case.get("ownership_proof"))
     if developer_contact:
@@ -585,7 +596,9 @@ async def generate_initial_draft(case: dict[str, Any], contact: dict[str, Any] |
         "relationship, date, ownership claim, or action already taken. Do not use em dashes or emojis. Do not sound "
         "like AI. Write in natural short paragraphs, not labels like 'What happened' or 'What we need'. If the "
         "contact role is developer, agency, contractor, engineer, admin, or similar, ask for the practical handoff "
-        "they can provide instead of sounding like a support ticket. Ask for a clear next step. Return JSON exactly "
+        "they can provide instead of sounding like a support ticket. Turn terse owner notes into professional wording "
+        "without changing their meaning, for example 'I got hacked' can become 'I believe the account was compromised "
+        "and I no longer have access.' Ask for a clear next step. Return JSON exactly "
         "as {\"message\": \"...\"}.",
         {"recovery_record": facts, "contact": contact_record},
         max_tokens=900,
@@ -738,7 +751,31 @@ def heuristic_classification(body: str, has_files: bool = False) -> str:
     text = body.casefold()
     if has_files or any(term in text for term in ("attached the files", "here are the files", "download link", "source files attached")):
         return "files_shared"
-    if any(term in text for term in ("need more proof", "provide proof", "proof of ownership", "verify ownership", "send evidence", "additional documentation")):
+    if any(term in text for term in (
+        "account name",
+        "account username",
+        "which account",
+        "what account",
+        "username to give access",
+        "email to give access",
+        "where should i give access",
+        "who should i invite",
+        "what user should i add",
+    )):
+        return "account_info_request"
+    if any(term in text for term in (
+        "need more proof",
+        "provide proof",
+        "proof of ownership",
+        "verify ownership",
+        "verify this is you",
+        "confirm this is you",
+        "confirm that this is actually you",
+        "confirm this is actually you",
+        "how can i confirm",
+        "send evidence",
+        "additional documentation",
+    )):
         return "proof_request"
     if any(term in text for term in (
         "cannot help",
@@ -780,13 +817,14 @@ def heuristic_classification(body: str, has_files: bool = False) -> str:
 
 async def classify_response(body: str, has_files: bool = False) -> str:
     heuristic = heuristic_classification(body, has_files)
-    if heuristic in {"files_shared", "proof_request", "access_offer", "rejection"}:
+    if heuristic in {"files_shared", "proof_request", "account_info_request", "access_offer", "rejection"}:
         return heuristic
     result = await call_ai_json(
         "Classify a recovery-case response. Return JSON exactly as {\"classification\": \"generic\"}. Allowed "
-        "values: proof_request, generic, access_offer, files_shared, rejection, other. files_shared means files or "
+        "values: proof_request, account_info_request, generic, access_offer, files_shared, rejection, other. files_shared means files or "
         "a file link were provided. access_offer means access, ownership, credentials, or an invitation is being "
-        "provided. proof_request means more ownership evidence is requested.",
+        "provided. proof_request means more ownership evidence is requested. account_info_request means the contact "
+        "is asking which account, username, email, repo, or identifier to restore or invite.",
         {"message": body, "has_files": has_files},
         max_tokens=200,
     )
@@ -809,18 +847,46 @@ async def generate_generic_followup(case: dict[str, Any], incoming: str) -> str:
     return "Thank you for the update. Please let us know the next required step and whether you need any specific ownership evidence from us."
 
 
-def proof_response_draft(case: dict[str, Any]) -> str:
+async def generate_recovery_followup(case: dict[str, Any], incoming: str, purpose: str) -> str:
     facts = case_fact_record(case)
-    available = [clean_text(facts.get("ownership_proof"))]
-    available.extend(clean_text(item) for item in facts.get("evidence_files", []))
-    available = [item for item in available if item]
-    if available:
-        proof_line = "The ownership evidence currently available is: " + "; ".join(available) + "."
-    else:
-        proof_line = "I am gathering the requested ownership evidence and will provide it after it has been reviewed."
-    return remove_emoji_and_emdash(
-        "Thank you for explaining what is needed. " + proof_line + " Please confirm the secure method you prefer for receiving the documents."
+    result = await call_ai_json(
+        "Write a concise professional recovery follow-up using only the supplied record and incoming message. "
+        "Do not invent proof, documents, access, actions, or claims. If the contact asks what account to restore or "
+        "invite, provide the account identifier from the record directly. If the owner said there is no proof, do "
+        "not pretend proof exists. Ask for the next verification step instead. Use natural paragraphs, not labels. "
+        "No em dashes or emojis. Return JSON exactly as {\"message\":\"...\"}.",
+        {"recovery_record": facts, "incoming_message": incoming, "purpose": purpose},
+        max_tokens=650,
     )
+    candidate = remove_emoji_and_emdash(clean_text((result or {}).get("message"), 5000))
+    if candidate and await verify_fact_locked_message(candidate, facts):
+        return candidate
+    return fallback_recovery_followup(case, incoming, purpose)
+
+
+def fallback_recovery_followup(case: dict[str, Any], incoming: str, purpose: str) -> str:
+    identifier = clean_text(case.get("account_identifier"))
+    owner = clean_text(case.get("owner_name")) or "the account owner"
+    proof = clean_text(case.get("ownership_proof"))
+    if purpose == "account_info_request" and identifier:
+        return remove_emoji_and_emdash(
+            f"Please use this account identifier for the access handoff: {identifier}.\n\n"
+            "If you need a different username, email address, or invitation target, tell me exactly where it should be added and I will confirm it.\n\n"
+            f"Regards,\n{owner}"
+        )
+    if purpose == "proof_request":
+        if proof and not re.search(r"\b(no proof|dont have any proof|don't have any proof|do not have proof|none)\b", proof, flags=re.IGNORECASE):
+            return remove_emoji_and_emdash(
+                f"I can share the ownership context I have: {proof}.\n\n"
+                "Please tell me the secure way you want me to send it, and whether there is anything specific you need to verify access.\n\n"
+                f"Regards,\n{owner}"
+            )
+        return remove_emoji_and_emdash(
+            "I do not have formal proof ready yet because this is an early startup, but I can answer verification questions about the account, repository, and work history.\n\n"
+            "Please tell me exactly what information you need to confirm this safely.\n\n"
+            f"Regards,\n{owner}"
+        )
+    return "Thank you. Please tell me the next step you need from me so we can restore access safely."
 
 
 async def save_upload(
@@ -1316,13 +1382,18 @@ async def process_inbound_message(
     if classification == "proof_request":
         contact_status = "needs_info"
         case_status = "needs_owner"
-        draft = proof_response_draft(case)
-        insert_message(case["id"], contact["id"], "outbound", "agent", draft, "draft", classification="proof_response")
+        draft = await generate_recovery_followup(case, body, "proof_request")
+        await send_and_record(case, contact, draft, sender_type="agent", initial=False)
         create_recovery_event(
             case["id"], "recovery_proof_requested", "high", "More recovery proof is needed",
             f"{contact['name']} asked for more ownership evidence in {case['title']}.",
-            {"contact_id": contact["id"], "message_id": message_id},
+            {"contact_id": contact["id"], "message_id": message_id, "contact_name": contact["name"], "incoming_message": body},
         )
+    elif classification == "account_info_request":
+        contact_status = "responded"
+        case_status = "outreach_active"
+        followup = await generate_recovery_followup(case, body, "account_info_request")
+        await send_and_record(case, contact, followup, sender_type="agent", initial=False)
     elif classification in {"access_offer", "files_shared"}:
         contact_status = "success"
         case_status = "action_required"
@@ -1331,7 +1402,7 @@ async def process_inbound_message(
             summary = f"{contact['name']} sent {len(saved_files)} file(s). They are ready to download in Recover."
         create_recovery_event(
             case["id"], "recovery_handoff_ready", "critical", "Recovery handoff is ready", summary,
-            {"contact_id": contact["id"], "message_id": message_id, "file_ids": [item["id"] for item in saved_files]},
+            {"contact_id": contact["id"], "message_id": message_id, "contact_name": contact["name"], "incoming_message": body, "file_ids": [item["id"] for item in saved_files]},
         )
     elif classification == "generic" and bool(case.get("auto_reply_generic")):
         followup = await generate_generic_followup(case, body)
@@ -1341,7 +1412,7 @@ async def process_inbound_message(
         create_recovery_event(
             case["id"], "recovery_rejected", "high", "A recovery contact declined the request",
             f"{contact['name']} declined or could not complete the recovery request.",
-            {"contact_id": contact["id"], "message_id": message_id},
+            {"contact_id": contact["id"], "message_id": message_id, "contact_name": contact["name"], "incoming_message": body},
         )
     execute(
         "UPDATE recovery_contacts SET status=?, last_response_at=?, updated_at=? WHERE id=?",
