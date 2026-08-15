@@ -964,6 +964,7 @@ function renderAccountDetail(account) {
   const allowedPeople = account.connector === "github" ? (settings.github_allowed_users || []) : (settings.allowed_identities || []);
   const monitoringList = (account.monitoring || []).map((item) => `<span>${escapeHtml(item)}</span>`).join("");
   const lastScan = baseline.last_scan || {};
+  const actionDisabled = !account.action_support;
   target.innerHTML = `
     <div class="panel-head">
       <h2>${escapeHtml(accountName(account))}</h2>
@@ -978,7 +979,7 @@ function renderAccountDetail(account) {
       <button type="submit" class="secondary">Save</button>
     </form>
     <form class="settings-grid app-settings-form" onsubmit="saveAccountSettings(event, ${account.id})">
-      <label class="toggle-label"><input name="auto_action_enabled" type="checkbox" ${settings.auto_action_enabled ? "checked" : ""} /> Take supported action if untouched</label>
+      <label class="toggle-label ${actionDisabled ? "disabled-setting" : ""}"><input name="auto_action_enabled" type="checkbox" ${settings.auto_action_enabled && !actionDisabled ? "checked" : ""} ${actionDisabled ? "disabled" : ""} /> Take supported action if untouched ${actionDisabled ? "<small>Coming soon for this app</small>" : ""}</label>
       <label class="toggle-label"><input name="windows_notifications" type="checkbox" ${settings.windows_notifications ? "checked" : ""} /> Windows notifications</label>
       <label>Untouched delay, minutes<input name="auto_action_delay_minutes" type="number" min="1" step="1" value="${escapeHtml(settings.auto_action_delay_minutes || 30)}" /></label>
       <label>Polling interval, seconds<input name="monitoring_poll_seconds" type="number" min="10" step="5" value="${escapeHtml(settings.monitoring_poll_seconds || settings.github_poll_seconds || 30)}" /></label>
