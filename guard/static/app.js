@@ -23,6 +23,9 @@ let recoveryData = { summary: {}, cases: [] };
 let selectedRecoveryCaseId = null;
 let selectedRecoveryContactId = null;
 let recoveryEditing = false;
+let recoveryDraftDirty = false;
+let recoverySyncingTelegram = false;
+let lastTelegramSyncAt = 0;
 let evidenceRowId = 0;
 
 function escapeHtml(value) {
@@ -57,6 +60,15 @@ async function postAction(url) {
   if (!response.ok) throw new Error(payload.detail || "Request failed");
   await loadOverview();
   return payload;
+}
+
+function activeEditableElement() {
+  const active = document.activeElement;
+  return active?.closest?.("input, textarea, select, [contenteditable='true']");
+}
+
+function viewIsActive(view) {
+  return $(`#${view}View`)?.classList.contains("active");
 }
 
 function actionLabel(actionId) {
@@ -263,7 +275,10 @@ function setView(view) {
   document.body.classList.remove("nav-open");
   $("#menuButton").setAttribute("aria-expanded", "false");
   window.scrollTo({ top: 0, behavior: "smooth" });
-  if (view === "recover") loadRecovery();
+  if (view === "recover") {
+    loadRecovery();
+    syncTelegramRecoveryQuiet();
+  }
 }
 
 function recoveryStatusLabel(status) {
@@ -554,6 +569,13 @@ function renderRecoveryCase(caseItem) {
       <section class="panel recovery-conversation">${recoveryConversationMarkup(caseItem, activeContact)}</section>
     </section>
   `;
+  const draftBox = $("#recoveryDraftMessage");
+  if (draftBox) {
+    draftBox.addEventListener("input", () => {
+      recoveryDraftDirty = true;
+      recoveryEditing = true;
+    });
+  }
   $$("#recoveryCaseDetail textarea, #recoveryCaseDetail input, #recoveryCaseDetail select").forEach((input) => {
     input.addEventListener("focus", () => {
       recoveryEditing = true;
@@ -576,7 +598,7 @@ async function loadRecoveryCase(caseId) {
 }
 
 async function loadRecovery() {
-  if (recoveryEditing || document.activeElement?.closest?.("#recoverView textarea, #recoverView input, #recoverView select")) return;
+  if (recoveryEditing || recoveryDraftDirty || activeEditableElement()?.closest?.("#recoverView")) return;
   try {
     const response = await fetch("/api/recovery");
     const data = await response.json();
@@ -604,6 +626,7 @@ async function loadRecovery() {
 
 async function selectRecoveryCase(caseId) {
   recoveryEditing = false;
+  recoveryDraftDirty = false;
   selectedRecoveryCaseId = caseId;
   selectedRecoveryContactId = null;
   await loadRecoveryCase(caseId);
@@ -632,10 +655,31 @@ async function syncTelegramRecovery(event) {
   }
 }
 
+async function syncTelegramRecoveryQuiet(force = false) {
+  if (recoverySyncingTelegram || !viewIsActive("recover") || recoveryEditing || recoveryDraftDirty || activeEditableElement()?.closest?.("#recoverView")) return;
+  const now = Date.now();
+  if (!force && now - lastTelegramSyncAt < 25000) return;
+  recoverySyncingTelegram = true;
+  lastTelegramSyncAt = now;
+  try {
+    const response = await fetch("/api/recovery/telegram/sync", { method: "POST" });
+    const payload = await response.json().catch(() => ({}));
+    if (response.ok && Number(payload.synced || 0) > 0) {
+      await loadRecovery();
+      await loadOverview();
+    }
+  } catch (error) {
+    console.debug("Telegram recovery sync skipped", error);
+  } finally {
+    recoverySyncingTelegram = false;
+  }
+}
+
 async function refreshRecoveryCaseFromResponse(response) {
   const data = await response.json();
   if (!response.ok) throw new Error(data.detail || "Recovery request failed.");
   recoveryEditing = false;
+  recoveryDraftDirty = false;
   selectedRecoveryCaseId = data.id;
   await loadRecovery();
   return data;
@@ -646,12 +690,19 @@ async function saveRecoveryDraft(event, caseId) {
   setButtonLoading(button, "Saving...");
   recoveryEditing = true;
   try {
+    const message = $("#recoveryDraftMessage").value;
     const response = await fetch(`/api/recovery/cases/${caseId}/draft`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message: $("#recoveryDraftMessage").value }),
+      body: JSON.stringify({ message }),
     });
-    await refreshRecoveryCaseFromResponse(response);
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || "Could not save the recovery message.");
+    recoveryEditing = false;
+    recoveryDraftDirty = false;
+    selectedRecoveryCaseId = data.id;
+    recoveryData.cases = (recoveryData.cases || []).map((item) => (item.id === data.id ? { ...item, ...data } : item));
+    renderRecoveryCase(data);
   } catch (error) {
     alert(error.message);
   } finally {
@@ -1172,13 +1223,18 @@ async function loadOverview() {
   const response = await fetch("/api/overview");
   const data = await response.json();
   lastData = data;
-  $("#securityScore").textContent = data.stats.security_score;
-  $("#securityScoreBar").style.width = `${Math.max(0, Math.min(100, Number(data.stats.security_score) || 0))}%`;
+  const hasSystems = Boolean(data.stats.has_systems);
+  $("#securityScore").textContent = hasSystems ? data.stats.security_score : "--";
+  $("#securityScoreBar").style.width = `${hasSystems ? Math.max(0, Math.min(100, Number(data.stats.security_score) || 0)) : 0}%`;
+  $("#postureTitle").textContent = hasSystems ? "Your connected systems are being watched." : "Connect your first app.";
+  $("#postureBody").textContent = hasSystems
+    ? "Retayn is comparing access, roles, settings, and critical resources against your approved baseline."
+    : "Add GitHub, Slack, Zendesk, Airtable, or another supported app to start monitoring access and role changes.";
   $("#openCount").textContent = data.stats.open_events;
   $("#coverageCount").textContent = data.stats.coverage;
   $("#sidebarPosture").textContent = data.stats.overall_security;
   $("#autoActionState").textContent = data.stats.auto_action_enabled ? "On" : "Off";
-  renderConnectorSelect(data.connectors || []);
+  if (!activeEditableElement()?.closest?.("#connectView")) renderConnectorSelect(data.connectors || []);
   renderCoverage(data.protection || { categories: [] });
   renderProtection(data.protection || { categories: [], score: 0 }, data.assets || []);
   renderAccounts(data.accounts);
@@ -1250,7 +1306,7 @@ $("#connectorSelect").addEventListener("change", () => {
 });
 
 $("#newRecoveryCaseButton").addEventListener("click", () => showRecoveryIntake());
-$("#syncTelegramRecoveryButton").addEventListener("click", syncTelegramRecovery);
+$("#syncTelegramRecoveryButton")?.addEventListener("click", syncTelegramRecovery);
 $("#addRecoveryContactButton").addEventListener("click", addRecoveryContact);
 $("#addRecoveryEvidenceFileButton").addEventListener("click", () => addEvidenceFileRow());
 $("#cancelRecoveryCaseButton").addEventListener("click", hideRecoveryIntake);
@@ -1364,7 +1420,10 @@ if ($("#recoveryEvidenceFiles")) {
 
 loadOverview();
 setView(["overview", "recover", "protection", "apps", "connect"].includes(window.location.hash.slice(1)) ? window.location.hash.slice(1) : "overview");
-setInterval(loadOverview, 5000);
 setInterval(() => {
-  if ($("#recoverView").classList.contains("active") && !recoveryEditing) loadRecovery();
+  if (!activeEditableElement() && !recoveryEditing && !recoveryDraftDirty && !editingSettings) loadOverview();
+}, 5000);
+setInterval(() => {
+  if (viewIsActive("recover") && !recoveryEditing && !recoveryDraftDirty && !activeEditableElement()?.closest?.("#recoverView")) loadRecovery();
 }, 8000);
+setInterval(() => syncTelegramRecoveryQuiet(), 15000);
