@@ -800,6 +800,7 @@ def build_protection_map(
     assets: list[dict[str, Any]],
     open_events: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    has_systems = bool(accounts or assets)
     alert_account_ids = {item.get("account_id") for item in open_events if item.get("account_id")}
     categories: list[dict[str, Any]] = []
     uncovered = 0
@@ -832,7 +833,7 @@ def build_protection_map(
             }
         )
 
-    score = 100 - uncovered * 12 - at_risk_assets * 4
+    score = 0 if not has_systems else 100 - at_risk_assets * 8
     score -= sum(20 if item["severity"] == "critical" else 10 if item["severity"] == "high" else 4 for item in open_events)
     score -= sum(8 for item in accounts if item["status"] == "error")
     score = max(0, min(100, score))
@@ -843,6 +844,7 @@ def build_protection_map(
         "total": len(SYSTEM_CATEGORIES),
         "gaps": uncovered,
         "at_risk_assets": at_risk_assets,
+        "has_systems": has_systems,
     }
 
 
@@ -2661,7 +2663,7 @@ async def overview() -> JSONResponse:
     protection = build_protection_map(accounts, assets, open_events)
     critical_open = sum(1 for item in open_events if item["severity"] == "critical")
     high_open = sum(1 for item in open_events if item["severity"] == "high")
-    posture = "critical" if critical_open else "needs review" if high_open or open_events or protection["gaps"] else "healthy"
+    posture = "not started" if not protection["has_systems"] else "critical" if critical_open else "needs review" if high_open or open_events else "healthy"
     any_auto_action = any(get_account_settings(account)["auto_action_enabled"] for account in accounts)
     return JSONResponse(
         {
@@ -2677,6 +2679,7 @@ async def overview() -> JSONResponse:
                 "prepared_connectors": [item for item in CONNECTORS if item != "github"],
                 "overall_security": posture,
                 "security_score": protection["score"],
+                "has_systems": protection["has_systems"],
                 "coverage": f"{protection['covered']}/{protection['total']}",
                 "auto_action_enabled": any_auto_action,
             },
@@ -3048,7 +3051,15 @@ async def add_account(request: Request) -> JSONResponse:
     account_id = int(existing["id"]) if existing else account_id
 
     if connector == "github":
-        await baseline_repo(account_id, owner, name)
+        try:
+            await baseline_repo(account_id, owner, name)
+        except HTTPException as exc:
+            execute("UPDATE accounts SET status='error', updated_at=? WHERE id=?", (utc_now(), account_id))
+            raise HTTPException(exc.status_code, github_error_message(exc, owner, name)) from exc
+        except Exception as exc:
+            logging.exception("GitHub baselining failed for %s/%s", owner, name)
+            execute("UPDATE accounts SET status='error', updated_at=? WHERE id=?", (utc_now(), account_id))
+            raise HTTPException(400, f"Retayn could not finish connecting {owner}/{name}. {exc!s}"[:500]) from exc
     elif connector == "shopify":
         token = await active_connection_token("shopify", owner, "")
         await baseline_shopify(account_id, owner, token["access_token"] if token else cfg["shopify_admin_token"])
