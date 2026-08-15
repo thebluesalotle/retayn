@@ -129,6 +129,17 @@ button:disabled {
   box-shadow: none;
 }
 
+.disabled-setting {
+  opacity: 0.62;
+}
+
+.disabled-setting small {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
 input,
 select,
 textarea {
