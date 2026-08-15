@@ -38,7 +38,7 @@ function escapeHtml(value) {
 
 async function postForm(url, form) {
   const response = await fetch(url, { method: "POST", body: new FormData(form) });
-  const payload = await response.json().catch(async () => ({ detail: await response.text().catch(() => "") }));
+  const payload = await response.clone().json().catch(async () => ({ detail: await response.text().catch(() => "") }));
   if (!response.ok) throw new Error(payload.detail || "Request failed");
   return payload;
 }
@@ -49,14 +49,14 @@ async function postJson(url, payload) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
-  const data = await response.json().catch(async () => ({ detail: await response.text().catch(() => "") }));
+  const data = await response.clone().json().catch(async () => ({ detail: await response.text().catch(() => "") }));
   if (!response.ok) throw new Error(data.detail || "Request failed");
   return data;
 }
 
 async function postAction(url) {
   const response = await fetch(url, { method: "POST" });
-  const payload = await response.json().catch(() => ({}));
+  const payload = await response.clone().json().catch(async () => ({ detail: await response.text().catch(() => "") }));
   if (!response.ok) throw new Error(payload.detail || "Request failed");
   await loadOverview();
   return payload;

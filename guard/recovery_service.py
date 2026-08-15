@@ -228,6 +228,8 @@ def normalize_address(channel: str, value: str) -> str:
     value = clean_text(value, 500)
     if channel == "email":
         return value.casefold()
+    if channel == "telegram":
+        return telegram_target(value)
     if channel == "whatsapp":
         return re.sub(r"\D", "", value)
     return value
@@ -248,6 +250,7 @@ def recovery_summary() -> dict[str, Any]:
 
 
 def list_recovery_cases() -> list[dict[str, Any]]:
+    cleanup_premature_telegram_sync()
     output = rows(
         """
         SELECT recovery_cases.*,
@@ -265,6 +268,7 @@ def list_recovery_cases() -> list[dict[str, Any]]:
 
 
 def get_recovery_case(case_id: int) -> dict[str, Any]:
+    cleanup_premature_telegram_sync(case_id)
     case = row("SELECT * FROM recovery_cases WHERE id=?", (case_id,))
     if not case:
         raise HTTPException(404, "Recovery case not found.")
@@ -366,15 +370,39 @@ async def call_ai_json(system_prompt: str, user_payload: dict[str, Any], max_tok
             )
         response.raise_for_status()
         content = response.json()["choices"][0]["message"]["content"]
-        result = json.loads(content)
+        result = parse_ai_json(content)
         return result if isinstance(result, dict) else None
     except Exception:
         logging.exception("Recovery AI request failed")
         return None
 
 
+def parse_ai_json(content: str) -> dict[str, Any] | None:
+    text = clean_text(content, 50000)
+    if not text:
+        return None
+    candidates = [text]
+    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.IGNORECASE | re.DOTALL)
+    if fenced:
+        candidates.insert(0, fenced.group(1))
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end > start:
+        candidates.append(text[start : end + 1])
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+
 def fallback_recovery_draft(case: dict[str, Any], contact: dict[str, Any] | None = None) -> str:
     name = clean_text((contact or {}).get("name")) or "Support team"
+    role = clean_text((contact or {}).get("role")).casefold()
+    channel = clean_text((contact or {}).get("channel")).casefold()
     owner = clean_text(case.get("owner_name")) or "the account owner"
     business = clean_text(case.get("business_name"))
     platform = clean_text(case.get("platform_name"))
@@ -387,14 +415,33 @@ def fallback_recovery_draft(case: dict[str, Any], contact: dict[str, Any] | None
     target = f"our {asset} on {platform}" if platform else f"our {asset}"
     if identifier:
         target += f", identified as {identifier}"
-    parts.append(f"{identity}. I am requesting help recovering access to {target}.")
+    developer_contact = any(term in role for term in ("developer", "engineer", "agency", "contractor", "freelancer", "admin"))
+    if developer_contact:
+        parts.append(f"{identity}. I am contacting you because you are listed as a person who may have access to {target}.")
+    else:
+        parts.append(f"{identity}. I am requesting help recovering access to {target}.")
     if clean_text(case.get("lockout_story")):
         parts.extend(["", f"What happened: {clean_text(case['lockout_story'])}"])
     if clean_text(case.get("recovery_goal")):
-        parts.extend(["", f"What we need: {clean_text(case['recovery_goal'])}"])
-    if clean_text(case.get("ownership_proof")):
-        parts.extend(["", f"Proof available: {clean_text(case['ownership_proof'])}"])
-    parts.extend(["", "Please let me know the verified steps and any additional evidence required to restore access.", "", f"Regards,", owner])
+        if developer_contact:
+            parts.extend(["", f"What I need from you: {clean_text(case['recovery_goal'])}"])
+        else:
+            parts.extend(["", f"What we need: {clean_text(case['recovery_goal'])}"])
+    proof = clean_text(case.get("ownership_proof"))
+    if proof and not re.search(r"\b(no proof|dont have any proof|don't have any proof|do not have proof|none)\b", proof, flags=re.IGNORECASE):
+        parts.extend(["", f"Ownership context available: {proof}"])
+    if developer_contact:
+        parts.extend(
+            [
+                "",
+                "Please reply with the access handoff you can complete, or tell me exactly what you need from me to verify and move this forward.",
+            ]
+        )
+    elif channel in {"support_portal", "email"}:
+        parts.extend(["", "Please let me know the verified steps and any additional evidence required to restore access."])
+    else:
+        parts.extend(["", "Please let me know the next step to restore access."])
+    parts.extend(["", f"Regards,", owner])
     if clean_text(case.get("owner_email")):
         parts.append(clean_text(case["owner_email"]))
     return remove_emoji_and_emdash("\n".join(parts))
@@ -877,6 +924,101 @@ def telegram_target(address: str) -> str:
     return value
 
 
+def parse_utc_datetime(value: Any) -> datetime | None:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def contact_has_sent_outreach(contact_id: int) -> bool:
+    return bool(
+        row(
+            """
+            SELECT id FROM recovery_messages
+            WHERE contact_id=? AND direction='outbound' AND status='sent'
+            LIMIT 1
+            """,
+            (contact_id,),
+        )
+    )
+
+
+def cleanup_premature_telegram_sync(case_id: int | None = None) -> int:
+    params: tuple[Any, ...] = (case_id,) if case_id else ()
+    case_filter = "AND recovery_contacts.case_id=?" if case_id else ""
+    contacts = rows(
+        f"""
+        SELECT recovery_contacts.* FROM recovery_contacts
+        WHERE recovery_contacts.channel='telegram' {case_filter}
+        """
+        ,
+        params,
+    )
+    removed = 0
+    upload_dir = user_upload_dir().resolve()
+    affected_cases: set[int] = set()
+    for contact in contacts:
+        if contact_has_sent_outreach(contact["id"]):
+            continue
+        stale_messages = rows(
+            """
+            SELECT * FROM recovery_messages
+            WHERE contact_id=? AND direction='inbound' AND external_id LIKE 'telegram-mtproto:%'
+            """,
+            (contact["id"],),
+        )
+        if not stale_messages:
+            continue
+        affected_cases.add(int(contact["case_id"]))
+        message_ids = [int(item["id"]) for item in stale_messages]
+        for file_item in rows(
+            f"SELECT * FROM recovery_files WHERE message_id IN ({','.join('?' for _ in message_ids)})",
+            tuple(message_ids),
+        ):
+            stored_name = clean_text(file_item.get("stored_name"), 500)
+            if stored_name:
+                path = (upload_dir / stored_name).resolve()
+                if path.parent == upload_dir and path.exists():
+                    try:
+                        path.unlink()
+                    except OSError:
+                        logging.exception("Could not remove premature Telegram recovery file")
+        execute(
+            f"DELETE FROM recovery_files WHERE message_id IN ({','.join('?' for _ in message_ids)})",
+            tuple(message_ids),
+        )
+        execute(
+            f"DELETE FROM recovery_messages WHERE id IN ({','.join('?' for _ in message_ids)})",
+            tuple(message_ids),
+        )
+        execute(
+            "UPDATE recovery_contacts SET status='queued', last_response_at=NULL, updated_at=? WHERE id=?",
+            (utc_now(), contact["id"]),
+        )
+        removed += len(message_ids)
+    for affected_case_id in affected_cases:
+        outbound = row(
+            """
+            SELECT id FROM recovery_messages
+            WHERE case_id=? AND direction='outbound' AND status IN ('sent','manual_required','waiting_setup')
+            LIMIT 1
+            """,
+            (affected_case_id,),
+        )
+        if not outbound:
+            execute(
+                "UPDATE recovery_cases SET status='message_review', approved_message=NULL, updated_at=? WHERE id=?",
+                (utc_now(), affected_case_id),
+            )
+    return removed
+
+
 def smtp_send(contact: dict[str, Any], subject: str, body: str, files: list[dict[str, Any]]) -> tuple[str, str]:
     cfg = recovery_config()
     if not cfg["smtp_host"] or not cfg["smtp_from"]:
@@ -1034,6 +1176,7 @@ async def dispatch_message(
 
 
 async def sync_telegram_mtproto_responses(limit_per_contact: int = 8) -> dict[str, Any]:
+    cleanup_premature_telegram_sync()
     session, api_id, api_hash = telegram_session()
     if not session or not api_id or not api_hash:
         return {"ok": False, "synced": 0, "message": "Telegram account sync needs MTProto API ID, API hash, and a signed-in session."}
@@ -1055,10 +1198,16 @@ async def sync_telegram_mtproto_responses(limit_per_contact: int = 8) -> dict[st
             if not await client.is_user_authorized():
                 return {"ok": False, "synced": 0, "message": "Telegram account session is not signed in yet."}
             for contact in contacts:
+                if not contact_has_sent_outreach(contact["id"]):
+                    continue
+                sync_after = parse_utc_datetime(contact.get("last_contacted_at")) or parse_utc_datetime(contact.get("created_at"))
                 try:
                     entity = await client.get_entity(telegram_target(contact["address"]))
                     async for message in client.iter_messages(entity, limit=limit_per_contact):
                         if getattr(message, "out", False):
+                            continue
+                        message_date = parse_utc_datetime(getattr(message, "date", None))
+                        if sync_after and message_date and message_date <= sync_after:
                             continue
                         external_id = f"telegram-mtproto:{getattr(message, 'chat_id', contact['address'])}:{message.id}"
                         if row("SELECT id FROM recovery_messages WHERE external_id=?", (external_id,)):
