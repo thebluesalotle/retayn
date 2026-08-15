@@ -337,13 +337,14 @@ function recoveryContactRow(index = Date.now()) {
         <label>Organization<input name="contact_organization" placeholder="Company or platform" /></label>
         <label>Contact channel
           <select name="contact_channel" required>
-            <option value="email">Support email</option>
             <option value="telegram">Telegram username or chat</option>
-            <option value="whatsapp">WhatsApp</option>
-            <option value="support_portal">Support portal</option>
-            <option value="phone">Phone</option>
-            <option value="other">Other</option>
+            <option value="email" disabled>Support email (coming soon)</option>
+            <option value="whatsapp" disabled>WhatsApp (coming soon)</option>
+            <option value="support_portal" disabled>Support portal (coming soon)</option>
+            <option value="phone" disabled>Phone / SMS (coming soon)</option>
+            <option value="other" disabled>Other (coming soon)</option>
           </select>
+          <small>Only Telegram is enabled in this prototype. Email, WhatsApp, SMS, and support portals are coming soon.</small>
         </label>
         <label class="full-field">Email, phone, Telegram username, Telegram chat, WhatsApp number, or support URL<input name="contact_address" required /></label>
         <label class="full-field">What does this person control or know?<textarea name="contact_notes" rows="3"></textarea></label>
@@ -520,6 +521,7 @@ function recoveryMessageMarkup(message) {
     <article class="recovery-message ${outbound ? "outbound" : "inbound"}">
       <div class="message-meta"><strong>${outbound ? (message.sender_type === "owner" ? "You" : "Retayn agent") : "Contact"}</strong><span>${escapeHtml(message.created_at)}</span></div>
       <p>${escapeHtml(message.body)}</p>
+      ${message.status === "draft" ? `<label class="draft-reply-editor">Edit before sending<textarea rows="4" data-draft-message-id="${message.id}">${escapeHtml(message.body)}</textarea></label>` : ""}
       ${(message.files || []).length ? `<div class="message-files">${recoveryFilesMarkup(message.files)}</div>` : ""}
       <div class="message-state">
         ${message.classification ? `<span>${escapeHtml(recoveryStatusLabel(message.classification))}</span>` : ""}
@@ -542,7 +544,11 @@ function recoveryConversationMarkup(caseItem, contact) {
     <div class="conversation-timeline">${messages.length ? messages.map(recoveryMessageMarkup).join("") : '<p class="empty">No messages recorded yet.</p>'}</div>
     <form class="conversation-compose" onsubmit="sendRecoveryReply(event, ${contact.id})">
       <label>Send a reviewed reply<textarea name="message" rows="4" placeholder="Write a factual reply..."></textarea></label>
-      <button type="submit">Send reply</button>
+      <div class="evidence-file-rows" data-evidence-upload-rows></div>
+      <div class="actions compact-actions">
+        <button type="button" class="secondary" onclick="addEvidenceFileRowForButton(this, false)">Attach proof</button>
+        <button type="submit">Send reply</button>
+      </div>
     </form>
     <details class="manual-response">
       <summary>Record a reply received outside Retayn</summary>
@@ -793,17 +799,12 @@ async function approveRecoveryOutreach(event, caseId) {
   const status = $("#recoveryDraftStatus");
   if (status) status.textContent = "Saving your approved message...";
   try {
-    const saveResponse = await fetch(`/api/recovery/cases/${caseId}/draft`, {
+    if (status) status.textContent = "Sending the approved message to your recovery contacts...";
+    const response = await fetch(`/api/recovery/cases/${caseId}/approve`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ message: $("#recoveryDraftMessage").value }),
     });
-    if (!saveResponse.ok) {
-      const error = await saveResponse.clone().json().catch(async () => ({ detail: await saveResponse.text().catch(() => "") }));
-      throw new Error(error.detail || "Could not save the approved message.");
-    }
-    if (status) status.textContent = "Sending the approved message to your recovery contacts...";
-    const response = await fetch(`/api/recovery/cases/${caseId}/approve`, { method: "POST" });
     await refreshRecoveryCaseFromResponse(response);
     if ($("#recoveryDraftStatus")) $("#recoveryDraftStatus").textContent = "Outreach started.";
   } catch (error) {
@@ -855,8 +856,7 @@ async function sendRecoveryReply(event, contactId) {
   try {
     const response = await fetch(`/api/recovery/contacts/${contactId}/reply`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message }),
+      body: formDataWithEvidenceRows(form),
     });
     await refreshRecoveryCaseFromResponse(response);
   } catch (error) {
@@ -871,7 +871,12 @@ async function approveRecoveryMessage(event, messageId) {
   const button = event.currentTarget;
   setButtonLoading(button, "Sending...");
   try {
-    const response = await fetch(`/api/recovery/messages/${messageId}/send`, { method: "POST" });
+    const edited = document.querySelector(`[data-draft-message-id="${messageId}"]`)?.value;
+    const response = await fetch(`/api/recovery/messages/${messageId}/send`, {
+      method: "POST",
+      headers: edited ? { "Content-Type": "application/json" } : undefined,
+      body: edited ? JSON.stringify({ message: edited }) : undefined,
+    });
     await refreshRecoveryCaseFromResponse(response);
   } catch (error) {
     alert(error.message);
@@ -959,6 +964,7 @@ function renderAccountDetail(account) {
   const allowedPeople = account.connector === "github" ? (settings.github_allowed_users || []) : (settings.allowed_identities || []);
   const monitoringList = (account.monitoring || []).map((item) => `<span>${escapeHtml(item)}</span>`).join("");
   const lastScan = baseline.last_scan || {};
+  const actionDisabled = !account.action_support;
   target.innerHTML = `
     <div class="panel-head">
       <h2>${escapeHtml(accountName(account))}</h2>
@@ -973,7 +979,7 @@ function renderAccountDetail(account) {
       <button type="submit" class="secondary">Save</button>
     </form>
     <form class="settings-grid app-settings-form" onsubmit="saveAccountSettings(event, ${account.id})">
-      <label class="toggle-label"><input name="auto_action_enabled" type="checkbox" ${settings.auto_action_enabled ? "checked" : ""} /> Take supported action if untouched</label>
+      <label class="toggle-label ${actionDisabled ? "disabled-setting" : ""}"><input name="auto_action_enabled" type="checkbox" ${settings.auto_action_enabled && !actionDisabled ? "checked" : ""} ${actionDisabled ? "disabled" : ""} /> Take supported action if untouched ${actionDisabled ? "<small>Coming soon for this app</small>" : ""}</label>
       <label class="toggle-label"><input name="windows_notifications" type="checkbox" ${settings.windows_notifications ? "checked" : ""} /> Windows notifications</label>
       <label>Untouched delay, minutes<input name="auto_action_delay_minutes" type="number" min="1" step="1" value="${escapeHtml(settings.auto_action_delay_minutes || 30)}" /></label>
       <label>Polling interval, seconds<input name="monitoring_poll_seconds" type="number" min="10" step="5" value="${escapeHtml(settings.monitoring_poll_seconds || settings.github_poll_seconds || 30)}" /></label>
