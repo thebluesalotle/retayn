@@ -27,6 +27,8 @@ let recoveryDraftDirty = false;
 let recoverySyncingTelegram = false;
 let lastTelegramSyncAt = 0;
 let evidenceRowId = 0;
+let browserNotificationPermissionAsked = false;
+let notifiedEventIds = new Set();
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -69,6 +71,24 @@ function activeEditableElement() {
 
 function viewIsActive(view) {
   return $(`#${view}View`)?.classList.contains("active");
+}
+
+function maybeRequestBrowserNotifications() {
+  if (browserNotificationPermissionAsked || !("Notification" in window) || Notification.permission !== "default") return;
+  browserNotificationPermissionAsked = true;
+  Notification.requestPermission().catch(() => {});
+}
+
+function notifyNewEvents(events) {
+  if (!("Notification" in window) || Notification.permission !== "granted") return;
+  for (const event of events || []) {
+    if (notifiedEventIds.has(event.id)) continue;
+    notifiedEventIds.add(event.id);
+    new Notification(event.title || "Retayn notification", {
+      body: event.summary || "Open Retayn to review this notification.",
+      tag: `retayn-${event.id}`,
+    });
+  }
 }
 
 function actionLabel(actionId) {
@@ -334,6 +354,33 @@ function recoveryContactRow(index = Date.now()) {
 
 function addRecoveryContact() {
   $("#recoveryContacts").insertAdjacentHTML("beforeend", recoveryContactRow());
+  bindRecoveryContactAddressHelpers();
+}
+
+function formatTelegramContactAddress(row) {
+  const channel = row.querySelector("select[name='contact_channel']")?.value;
+  const input = row.querySelector("input[name='contact_address']");
+  if (!input || channel !== "telegram") return;
+  const value = input.value.trim();
+  if (!value || value.startsWith("@") || value.startsWith("https://") || value.startsWith("http://") || value.startsWith("+")) return;
+  if (/^[A-Za-z0-9_]{5,32}$/.test(value)) input.value = `@${value}`;
+}
+
+function bindRecoveryContactAddressHelpers() {
+  $$("#recoveryContacts .recovery-contact-row").forEach((row) => {
+    if (row.dataset.addressHelpersBound) return;
+    row.dataset.addressHelpersBound = "true";
+    const channel = row.querySelector("select[name='contact_channel']");
+    const input = row.querySelector("input[name='contact_address']");
+    channel?.addEventListener("change", () => {
+      if (channel.value === "telegram" && input && !input.value.trim()) input.value = "@";
+      formatTelegramContactAddress(row);
+    });
+    input?.addEventListener("focus", () => {
+      if (channel?.value === "telegram" && !input.value.trim()) input.value = "@";
+    });
+    input?.addEventListener("blur", () => formatTelegramContactAddress(row));
+  });
 }
 
 function removeRecoveryContact(button) {
@@ -427,6 +474,7 @@ function showRecoveryIntake(reset = true) {
     $("#recoveryContacts").innerHTML = recoveryContactRow(1);
     $("#recoveryEvidenceFiles").innerHTML = evidenceFileRow();
     $("#recoveryFormNote").textContent = "";
+    bindRecoveryContactAddressHelpers();
   }
   recoveryEditing = true;
 }
@@ -636,6 +684,17 @@ async function selectRecoveryCase(caseId) {
 async function selectRecoveryContact(contactId) {
   selectedRecoveryContactId = contactId;
   if (selectedRecoveryCaseId) await loadRecoveryCase(selectedRecoveryCaseId);
+}
+
+async function openRecoveryCaseFromEvent(caseId) {
+  if (!caseId) {
+    setView("recover");
+    return;
+  }
+  selectedRecoveryCaseId = caseId;
+  selectedRecoveryContactId = null;
+  setView("recover");
+  await loadRecoveryCase(caseId);
 }
 
 async function syncTelegramRecovery(event) {
@@ -978,6 +1037,14 @@ function selectAccount(accountId) {
 
 function detailsFor(event) {
   const details = event.details || {};
+  if (event.connector === "recovery" || String(event.event_type || "").startsWith("recovery_")) {
+    return {
+      title: details.contact_name ? `Message from ${details.contact_name}` : "Recovery message",
+      lines: [
+        details.incoming_message || event.summary || "Open the recovery case to review the conversation.",
+      ],
+    };
+  }
   if (event.event_type === "new_collaborator") {
     const collab = details.collaborator || {};
     const actor = details.appointed_by || {};
@@ -1048,6 +1115,25 @@ function renderEvents(events) {
   }
   target.innerHTML = events.map((event) => {
     const info = detailsFor(event);
+    if (event.connector === "recovery" || String(event.event_type || "").startsWith("recovery_")) {
+      const caseId = event.details?.case_id;
+      return `
+        <article class="event-card ${escapeHtml(event.severity)}">
+          <div class="event-head">
+            <div class="event-copy">
+              <strong>${escapeHtml(event.title)}</strong>
+              <span class="event-time">${escapeHtml(event.created_at)} &middot; Recovery</span>
+            </div>
+            <span class="severity ${escapeHtml(event.severity)}">${escapeHtml(event.severity)}</span>
+          </div>
+          <p class="event-summary">${escapeHtml(event.summary)}</p>
+          <div class="details"><strong>${escapeHtml(info.title)}</strong><pre>${escapeHtml(info.lines.join("\n"))}</pre></div>
+          <div class="actions">
+            <button class="safe" onclick="openRecoveryCaseFromEvent(${Number(caseId) || 0})">Go to recovery case</button>
+          </div>
+        </article>
+      `;
+    }
     const actions = supportedActionsFor(event);
     const supportedAction = actions.length > 0;
     const primaryAction = actions[0] || null;
@@ -1257,6 +1343,7 @@ async function loadOverview() {
   renderAccounts(data.accounts);
   if (!editingSettings) renderManageApps(data.accounts);
   renderEvents(data.open_events);
+  notifyNewEvents(data.open_events || []);
   renderRecent(data.recent_events);
 }
 
@@ -1420,6 +1507,7 @@ $("#refreshButton").addEventListener("click", async (event) => {
   }
 });
 $$(".nav-item").forEach((button) => button.addEventListener("click", () => setView(button.dataset.view)));
+document.addEventListener("click", maybeRequestBrowserNotifications, { once: true });
 
 $("#menuButton").addEventListener("click", () => {
   const isOpen = document.body.classList.toggle("nav-open");
@@ -1443,4 +1531,4 @@ setInterval(() => {
 setInterval(() => {
   if (viewIsActive("recover") && !recoveryEditing && !recoveryDraftDirty && !activeEditableElement()?.closest?.("#recoverView")) loadRecovery();
 }, 8000);
-setInterval(() => syncTelegramRecoveryQuiet(), 15000);
+setInterval(() => syncTelegramRecoveryQuiet(), 10000);
