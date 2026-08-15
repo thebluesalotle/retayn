@@ -2413,29 +2413,10 @@ def friendly_connection_error(exc: Exception) -> str:
 
 
 def record_connection_error(account: dict[str, Any], exc: Exception) -> None:
-    connector_name = CONNECTORS.get(account["connector"], {}).get("name", account["connector"])
-    unique = "connection_error"
     health = snapshot_get(account["id"], "scan_health", {})
     failures = int(health.get("consecutive_failures") or 0) + 1
     hard_failure = connection_error_is_hard(exc)
-    should_alert = failures >= (HARD_CONNECTION_ALERT_FAILURES if hard_failure else SOFT_CONNECTION_ALERT_FAILURES)
     friendly_error = friendly_connection_error(exc)
-    if should_alert and not open_event_exists(account["id"], "connection_error", unique):
-        create_event(
-            account["id"],
-            "connection_error",
-            "high" if hard_failure else "medium",
-            f"{connector_name} monitoring interrupted",
-            f"Retayn could not verify {account_display(account)} after {failures} failed check{'s' if failures != 1 else ''}.",
-            {
-                "unique_key": unique,
-                "error": friendly_error,
-                "raw_error": str(exc)[:500],
-                "consecutive_failures": failures,
-                "hard_failure": hard_failure,
-                "supported_action": None,
-            },
-        )
     snapshot_set(account["id"], "scan_health", {"consecutive_failures": failures, "last_error_at": utc_now(), "hard_failure": hard_failure})
     snapshot_set(account["id"], "last_scan", {"at": utc_now(), "status": "error", "message": friendly_error, "consecutive_failures": failures})
 
