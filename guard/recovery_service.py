@@ -847,6 +847,24 @@ async def generate_generic_followup(case: dict[str, Any], incoming: str) -> str:
     return "Thank you for the update. Please let us know the next required step and whether you need any specific ownership evidence from us."
 
 
+def routine_acknowledgement(body: str) -> bool:
+    text = clean_text(body, 1000).casefold()
+    return any(
+        term in text
+        for term in (
+            "let me check",
+            "i will check",
+            "i'll check",
+            "checking now",
+            "looking into it",
+            "i will look",
+            "i'll look",
+            "give me a minute",
+            "one moment",
+        )
+    )
+
+
 async def generate_recovery_followup(case: dict[str, Any], incoming: str, purpose: str) -> str:
     facts = case_fact_record(case)
     result = await call_ai_json(
@@ -1024,6 +1042,19 @@ def contact_has_sent_outreach(contact_id: int) -> bool:
             """
             SELECT id FROM recovery_messages
             WHERE contact_id=? AND direction='outbound' AND status='sent'
+            LIMIT 1
+            """,
+            (contact_id,),
+        )
+    )
+
+
+def contact_has_pending_draft(contact_id: int) -> bool:
+    return bool(
+        row(
+            """
+            SELECT id FROM recovery_messages
+            WHERE contact_id=? AND direction='outbound' AND status='draft'
             LIMIT 1
             """,
             (contact_id,),
@@ -1285,7 +1316,8 @@ async def sync_telegram_mtproto_responses(limit_per_contact: int = 8) -> dict[st
                 sync_after = parse_utc_datetime(contact.get("last_contacted_at")) or parse_utc_datetime(contact.get("created_at"))
                 try:
                     entity = await client.get_entity(telegram_target(contact["address"]))
-                    async for message in client.iter_messages(entity, limit=limit_per_contact):
+                    messages = [message async for message in client.iter_messages(entity, limit=limit_per_contact)]
+                    for message in reversed(messages):
                         if getattr(message, "out", False):
                             continue
                         message_date = parse_utc_datetime(getattr(message, "date", None))
@@ -1349,6 +1381,9 @@ async def send_and_record(
         external_id=provider_result if status == "sent" else None,
         delivery_note=None if status == "sent" else provider_result,
     )
+    for item in files or []:
+        if item.get("id"):
+            execute("UPDATE recovery_files SET message_id=? WHERE id=?", (message_id, item["id"]))
     contact_status = "contacted" if status == "sent" else status
     execute(
         "UPDATE recovery_contacts SET status=?, last_contacted_at=?, updated_at=? WHERE id=?",
@@ -1383,7 +1418,7 @@ async def process_inbound_message(
         contact_status = "needs_info"
         case_status = "needs_owner"
         draft = await generate_recovery_followup(case, body, "proof_request")
-        await send_and_record(case, contact, draft, sender_type="agent", initial=False)
+        insert_message(case["id"], contact["id"], "outbound", "agent", draft, "draft", classification="proof_response")
         create_recovery_event(
             case["id"], "recovery_proof_requested", "high", "More recovery proof is needed",
             f"{contact['name']} asked for more ownership evidence in {case['title']}.",
@@ -1392,8 +1427,11 @@ async def process_inbound_message(
     elif classification == "account_info_request":
         contact_status = "responded"
         case_status = "outreach_active"
-        followup = await generate_recovery_followup(case, body, "account_info_request")
-        await send_and_record(case, contact, followup, sender_type="agent", initial=False)
+        if contact_has_pending_draft(contact["id"]):
+            case_status = "needs_owner"
+        else:
+            followup = await generate_recovery_followup(case, body, "account_info_request")
+            await send_and_record(case, contact, followup, sender_type="agent", initial=False)
     elif classification in {"access_offer", "files_shared"}:
         contact_status = "success"
         case_status = "action_required"
@@ -1404,7 +1442,7 @@ async def process_inbound_message(
             case["id"], "recovery_handoff_ready", "critical", "Recovery handoff is ready", summary,
             {"contact_id": contact["id"], "message_id": message_id, "contact_name": contact["name"], "incoming_message": body, "file_ids": [item["id"] for item in saved_files]},
         )
-    elif classification == "generic" and bool(case.get("auto_reply_generic")):
+    elif classification == "generic" and bool(case.get("auto_reply_generic")) and not routine_acknowledgement(body) and not contact_has_pending_draft(contact["id"]):
         followup = await generate_generic_followup(case, body)
         await send_and_record(case, contact, followup, sender_type="agent", initial=False)
     elif classification == "rejection":
@@ -1595,11 +1633,13 @@ async def regenerate_recovery_draft(case_id: int) -> JSONResponse:
 
 
 @router.post("/api/recovery/cases/{case_id}/approve")
-async def approve_recovery_outreach(case_id: int) -> JSONResponse:
+async def approve_recovery_outreach(case_id: int, request: Request) -> JSONResponse:
     case = row("SELECT * FROM recovery_cases WHERE id=?", (case_id,))
     if not case:
         raise HTTPException(404, "Recovery case not found.")
-    message = clean_text(case.get("draft_message"), 12000)
+    payload = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    submitted_message = remove_emoji_and_emdash(clean_text(payload.get("message"), 12000))
+    message = submitted_message or clean_text(case.get("draft_message"), 12000)
     if len(message) < 40:
         raise HTTPException(400, "Review and save a complete first message before starting outreach.")
     contacts = rows("SELECT * FROM recovery_contacts WHERE case_id=? ORDER BY created_at", (case_id,))
@@ -1613,13 +1653,14 @@ async def approve_recovery_outreach(case_id: int) -> JSONResponse:
     case["approved_message"] = message
     case["status"] = "outreach_active"
     files = case_owner_files(case_id) if bool(case.get("share_evidence_initially")) else []
+    first_contact_id = contacts[0]["id"] if contacts else None
     for contact in contacts:
         already_sent = row(
             "SELECT id FROM recovery_messages WHERE contact_id=? AND direction='outbound' AND status IN ('sent','manual_required','waiting_setup') LIMIT 1",
             (contact["id"],),
         )
         if not already_sent:
-            contact_message = await personalize_recovery_message(case, contact, message)
+            contact_message = message if contact["id"] == first_contact_id else await personalize_recovery_message(case, contact, message)
             await send_and_record(case, contact, contact_message, files=files, initial=True)
     return JSONResponse(get_recovery_case(case_id))
 
@@ -1672,7 +1713,7 @@ async def record_manual_response(contact_id: int, request: Request) -> JSONRespo
 
 
 @router.post("/api/recovery/messages/{message_id}/send")
-async def approve_recovery_message(message_id: int) -> JSONResponse:
+async def approve_recovery_message(message_id: int, request: Request) -> JSONResponse:
     message = row("SELECT * FROM recovery_messages WHERE id=?", (message_id,))
     if not message:
         raise HTTPException(404, "Recovery message not found.")
@@ -1682,11 +1723,17 @@ async def approve_recovery_message(message_id: int) -> JSONResponse:
     contact = row("SELECT * FROM recovery_contacts WHERE id=?", (message["contact_id"],))
     if not case or not contact:
         raise HTTPException(404, "Recovery case or contact not found.")
-    await ensure_outbound_message_safe(message["body"], case, contact)
-    status, provider_result = await dispatch_message(case, contact, message["body"], case_owner_files(case["id"]), False)
+    body = message["body"]
+    if request.headers.get("content-type", "").startswith("application/json"):
+        payload = await request.json()
+        submitted = remove_emoji_and_emdash(clean_text(payload.get("message"), 12000))
+        if submitted:
+            body = submitted
+    await ensure_outbound_message_safe(body, case, contact)
+    status, provider_result = await dispatch_message(case, contact, body, case_owner_files(case["id"]), False)
     execute(
-        "UPDATE recovery_messages SET status=?, external_id=?, delivery_note=? WHERE id=?",
-        (status, provider_result if status == "sent" else None, None if status == "sent" else provider_result, message_id),
+        "UPDATE recovery_messages SET body=?, status=?, external_id=?, delivery_note=? WHERE id=?",
+        (body, status, provider_result if status == "sent" else None, None if status == "sent" else provider_result, message_id),
     )
     execute(
         "UPDATE recovery_contacts SET status=?, last_contacted_at=?, updated_at=? WHERE id=?",
@@ -1705,12 +1752,21 @@ async def send_owner_recovery_reply(contact_id: int, request: Request) -> JSONRe
     case = row("SELECT * FROM recovery_cases WHERE id=?", (contact["case_id"],))
     if not case:
         raise HTTPException(404, "Recovery case not found.")
-    payload = await request.json()
-    body = remove_emoji_and_emdash(clean_text(payload.get("message"), 12000))
+    files: list[dict[str, Any]] = []
+    if request.headers.get("content-type", "").startswith("multipart/form-data"):
+        form = await request.form()
+        body = remove_emoji_and_emdash(clean_text(form.get("message"), 12000))
+        uploads = [item for item in form.getlist("evidence_files") if hasattr(item, "filename") and item.filename]
+        labels = [clean_text(item, 240) for item in form.getlist("evidence_label")]
+        for index, upload in enumerate(uploads):
+            files.append(await save_upload(upload, case["id"], "owner", labels[index] if index < len(labels) else "", contact_id=contact["id"]))
+    else:
+        payload = await request.json()
+        body = remove_emoji_and_emdash(clean_text(payload.get("message"), 12000))
     if len(body) < 2:
         raise HTTPException(400, "Enter a reply before sending.")
     await ensure_outbound_message_safe(body, case, contact)
-    await send_and_record(case, contact, body, sender_type="owner", initial=False)
+    await send_and_record(case, contact, body, sender_type="owner", files=files, initial=False)
     return JSONResponse(get_recovery_case(case["id"]))
 
 
