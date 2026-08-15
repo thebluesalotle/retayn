@@ -28,7 +28,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from auth import current_session, google_config, init_auth_db, router as auth_router, user_for_webhook_token
-from auth_context import current_user_id, reset_current_user, set_current_user, user_db_path
+from auth_context import DATA_DIR, current_user_id, reset_current_user, set_current_user, user_db_path
 from recovery_service import init_recovery_db, recovery_summary, router as recovery_router
 
 try:
@@ -271,6 +271,35 @@ def config() -> dict[str, Any]:
         "zendesk_install_url": os.getenv("ZENDESK_INSTALL_URL", "").strip(),
         "zendesk_email": os.getenv("ZENDESK_EMAIL", "").strip(),
         "zendesk_api_token": os.getenv("ZENDESK_API_TOKEN", "").strip(),
+    }
+
+
+def persistence_status() -> dict[str, Any]:
+    render_env = bool(os.getenv("RENDER") or os.getenv("RENDER_SERVICE_ID") or os.getenv("RENDER_EXTERNAL_URL"))
+    configured = bool(os.getenv("RETAYN_DATA_DIR"))
+    expected_render_path = Path("/data").resolve()
+    writable = False
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        (DATA_DIR / ".retayn-write-check").write_text(utc_now(), encoding="utf-8")
+        writable = True
+    except Exception:
+        logging.exception("Retayn data directory is not writable")
+    risky = (render_env and DATA_DIR != expected_render_path) or not configured or not writable
+    message = ""
+    if risky:
+        message = (
+            "Retayn may forget connected apps, protection map entries, and recovery cases after redeploy. "
+            "On Render, attach a Persistent Disk mounted at /data and set RETAYN_DATA_DIR=/data."
+        )
+    return {
+        "path": str(DATA_DIR),
+        "configured": configured,
+        "writable": writable,
+        "render": render_env,
+        "persistent_mount_expected": str(expected_render_path),
+        "risky": risky,
+        "message": message,
     }
 
 
@@ -2684,6 +2713,7 @@ async def overview() -> JSONResponse:
                 "auto_action_enabled": any_auto_action,
             },
             "settings": get_settings(),
+            "persistence": persistence_status(),
             "recovery": recovery_summary(),
             "connectors": connector_definitions(),
             "system_categories": [dict(id=key, **value) for key, value in SYSTEM_CATEGORIES.items()],
