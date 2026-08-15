@@ -429,6 +429,12 @@ def enforce_contact_greeting(message: str, contact: dict[str, Any] | None) -> st
     return remove_emoji_and_emdash("\n".join(lines))
 
 
+def meaningful_recovery_message(message: str) -> bool:
+    lines = [line.strip() for line in clean_text(message, 12000).splitlines() if line.strip()]
+    body = " ".join(line for line in lines if not re.match(r"^(hello|hi|dear)\b", line, flags=re.IGNORECASE))
+    return len(body) >= 80 and len(body.split()) >= 16
+
+
 def heuristic_outbound_message_review(message: str) -> dict[str, Any]:
     text = message.casefold()
     blocked_terms = (
@@ -523,7 +529,7 @@ async def generate_initial_draft(case: dict[str, Any], contact: dict[str, Any] |
         max_tokens=900,
     )
     candidate = enforce_contact_greeting(remove_emoji_and_emdash(clean_text((result or {}).get("message"), 12000)), contact)
-    if candidate and await verify_fact_locked_message(candidate, message_facts):
+    if meaningful_recovery_message(candidate) and await verify_fact_locked_message(candidate, message_facts):
         return candidate
     return fallback_recovery_draft(case, contact)
 
@@ -548,7 +554,7 @@ async def personalize_recovery_message(case: dict[str, Any], contact: dict[str, 
         max_tokens=900,
     )
     candidate = enforce_contact_greeting(remove_emoji_and_emdash(clean_text((result or {}).get("message"), 12000)), contact)
-    if candidate and await verify_fact_locked_message(candidate, message_facts):
+    if meaningful_recovery_message(candidate) and await verify_fact_locked_message(candidate, message_facts):
         return candidate
     return fallback_recovery_draft(case, contact)
 
