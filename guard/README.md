@@ -18,6 +18,8 @@ The dashboard's `Protection map` covers:
 
 Native connectors monitor provider APIs continuously. Systems without a native connector can still be added to the critical-system inventory with their control holders, recovery contact, recovery path, criticality, and independent backup status. Coverage gaps and missing recovery controls lower the security score.
 
+Protection Map entries do not give Retayn API access by themselves. They are manual business-continuity records for systems Retayn cannot connect to yet, such as domains, app stores, signing keys, cloud accounts, DNS, billing, or release pipelines. Adding one lets Retayn show coverage gaps, flag missing recovery contacts or backups, keep the system in the owner's recovery record, and make future recovery work faster. Native connectors are what perform live monitoring.
+
 ## Current Connectors
 
 - GitHub repositories
@@ -66,6 +68,18 @@ These live under `My apps` for each connected app:
 - Allowed write deploy key titles
 
 Keep `.env` for secrets only.
+
+## Persistent Storage
+
+Retayn stores sign-ins, connected apps, baselines, alerts, Protection Map records, recovery cases, OAuth tokens, and uploaded recovery evidence in SQLite files and upload folders under `RETAYN_DATA_DIR`.
+
+For Render, this must be a Persistent Disk mounted at `/data`, with:
+
+```text
+RETAYN_DATA_DIR=/data
+```
+
+The included `render.yaml` defines this disk. If the service was created manually or the disk is not attached to the Guard service, Render redeploys will erase the container filesystem and Retayn will look like it forgot everything. Keep one instance/worker while using SQLite, and migrate to managed Postgres/object storage before scaling horizontally.
 
 ## Adding Providers
 

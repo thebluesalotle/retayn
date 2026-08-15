@@ -507,6 +507,25 @@ strong {
   display: none !important;
 }
 
+.system-warning {
+  margin-bottom: 14px;
+  padding: 13px 15px;
+  border: 1px solid rgba(217, 119, 6, 0.28);
+  border-radius: 7px;
+  background: #fff7ed;
+  color: #7c2d12;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.system-warning strong {
+  display: block;
+  margin-bottom: 3px;
+  color: #431407;
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
 .panel {
   min-width: 0;
   padding: 20px;
@@ -592,6 +611,10 @@ strong {
   color: #69808f;
   font-size: 12px;
   font-weight: 700;
+}
+
+.posture-score-row > strong.score-empty::after {
+  content: "";
 }
 
 .posture-score-row h2 {

@@ -399,6 +399,13 @@ def parse_ai_json(content: str) -> dict[str, Any] | None:
     return None
 
 
+def sentence(value: str) -> str:
+    text = clean_text(value, 5000)
+    if not text:
+        return ""
+    return text if text.endswith((".", "!", "?")) else f"{text}."
+
+
 def fallback_recovery_draft(case: dict[str, Any], contact: dict[str, Any] | None = None) -> str:
     name = clean_text((contact or {}).get("name")) or "Support team"
     role = clean_text((contact or {}).get("role")).casefold()
@@ -416,25 +423,30 @@ def fallback_recovery_draft(case: dict[str, Any], contact: dict[str, Any] | None
     if identifier:
         target += f", identified as {identifier}"
     developer_contact = any(term in role for term in ("developer", "engineer", "agency", "contractor", "freelancer", "admin"))
-    if developer_contact:
-        parts.append(f"{identity}. I am contacting you because you are listed as a person who may have access to {target}.")
-    else:
-        parts.append(f"{identity}. I am requesting help recovering access to {target}.")
-    if clean_text(case.get("lockout_story")):
-        parts.extend(["", f"What happened: {clean_text(case['lockout_story'])}"])
-    if clean_text(case.get("recovery_goal")):
-        if developer_contact:
-            parts.extend(["", f"What I need from you: {clean_text(case['recovery_goal'])}"])
-        else:
-            parts.extend(["", f"What we need: {clean_text(case['recovery_goal'])}"])
+    lockout = clean_text(case.get("lockout_story"))
+    goal = clean_text(case.get("recovery_goal"))
     proof = clean_text(case.get("ownership_proof"))
+    if developer_contact:
+        parts.append(f"{sentence(identity)} I am contacting you because you may still have access to {target}.")
+    else:
+        parts.append(f"{sentence(identity)} I am requesting help recovering access to {target}.")
+    if lockout:
+        parts.extend(["", sentence(lockout[0].upper() + lockout[1:] if len(lockout) > 1 else lockout)])
+    if goal:
+        plain_goal = goal
+        if developer_contact and goal.casefold() in {"everything", "all", "all of it"}:
+            plain_goal = "send me a copy of the repository files and help restore my owner or admin access"
+        if developer_contact:
+            parts.extend(["", f"Please {plain_goal.rstrip('.')}."])
+        else:
+            parts.extend(["", f"I need help to {plain_goal.rstrip('.')}."])
     if proof and not re.search(r"\b(no proof|dont have any proof|don't have any proof|do not have proof|none)\b", proof, flags=re.IGNORECASE):
-        parts.extend(["", f"Ownership context available: {proof}"])
+        parts.extend(["", f"I can share ownership context if needed: {proof}"])
     if developer_contact:
         parts.extend(
             [
                 "",
-                "Please reply with the access handoff you can complete, or tell me exactly what you need from me to verify and move this forward.",
+                "Please reply with what you can hand over, or tell me the exact step you need from me so we can get access restored.",
             ]
         )
     elif channel in {"support_portal", "email"}:
@@ -571,7 +583,10 @@ async def generate_initial_draft(case: dict[str, Any], contact: dict[str, Any] |
         "Address the contact by their actual name when provided. Do not address the platform support team unless "
         "the contact name itself is that support team. Never invent a fact, document, "
         "relationship, date, ownership claim, or action already taken. Do not use em dashes or emojis. Do not sound "
-        "like AI. Ask for a clear next step. Return JSON exactly as {\"message\": \"...\"}.",
+        "like AI. Write in natural short paragraphs, not labels like 'What happened' or 'What we need'. If the "
+        "contact role is developer, agency, contractor, engineer, admin, or similar, ask for the practical handoff "
+        "they can provide instead of sounding like a support ticket. Ask for a clear next step. Return JSON exactly "
+        "as {\"message\": \"...\"}.",
         {"recovery_record": facts, "contact": contact_record},
         max_tokens=900,
     )
@@ -596,7 +611,8 @@ async def personalize_recovery_message(case: dict[str, Any], contact: dict[str, 
         "Personalize the reviewed recovery message for this exact contact using only the supplied record, contact, "
         "and reviewed message. Preserve the owner-approved facts and request. Change the greeting and wording so it "
         "fits the contact's name, role, organization, notes, and channel. Do not add new claims, documents, threats, "
-        "or pressure. Do not use em dashes or emojis. Return JSON exactly as {\"message\": \"...\"}.",
+        "or pressure. Use natural short paragraphs, not label blocks. Do not use em dashes or emojis. Return JSON "
+        "exactly as {\"message\": \"...\"}.",
         {"recovery_record": facts, "contact": contact_record, "reviewed_message": reviewed_message},
         max_tokens=900,
     )
