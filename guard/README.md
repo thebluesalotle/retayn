@@ -434,8 +434,10 @@ GITHUB_APP_ID=123456
 GITHUB_PRIVATE_KEY_PATH=retayn-guard-local.private-key.pem
 AI_API_KEY=
 AI_BASE_URL=https://api.deepseek.com
-AI_MODEL=deepseek-chat
+AI_MODEL=deepseek-v4-flash
 ```
+
+After deploying, open `/api/recovery/ai/health` while signed in to confirm the running server can see the env vars and receive a valid DeepSeek JSON response.
 
 `GITHUB_APP_SLUG` is the slug in a GitHub App install URL like `https://github.com/apps/retayn-guard-local/installations/new`. It powers the dashboard's `Open GitHub install` button.
 

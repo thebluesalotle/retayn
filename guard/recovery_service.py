@@ -77,7 +77,7 @@ def recovery_config() -> dict[str, Any]:
     return {
         "ai_api_key": os.getenv("AI_API_KEY", "").strip(),
         "ai_base_url": os.getenv("AI_BASE_URL", "https://api.deepseek.com").strip().rstrip("/"),
-        "ai_model": os.getenv("AI_MODEL", "deepseek-chat").strip(),
+        "ai_model": os.getenv("AI_MODEL", "deepseek-v4-flash").strip(),
         "smtp_host": os.getenv("RECOVERY_SMTP_HOST", "").strip(),
         "smtp_port": int(os.getenv("RECOVERY_SMTP_PORT", "587") or 587),
         "smtp_username": os.getenv("RECOVERY_SMTP_USERNAME", "").strip(),
@@ -364,9 +364,43 @@ def remove_emoji_and_emdash(value: str) -> str:
     return emoji_ranges.sub("", value).strip()
 
 
-async def call_ai_json(system_prompt: str, user_payload: dict[str, Any], max_tokens: int = 1000) -> dict[str, Any] | None:
+def ai_chat_url(base_url: str) -> str:
+    base = clean_text(base_url, 1000).rstrip("/")
+    if not base:
+        base = "https://api.deepseek.com"
+    if base.endswith("/chat/completions"):
+        return base
+    return f"{base}/chat/completions"
+
+
+def ai_error_detail(response: httpx.Response) -> str:
+    detail = clean_text(response.text, 700)
+    try:
+        payload = response.json()
+        if isinstance(payload, dict):
+            message = payload.get("message") or (payload.get("error") or {}).get("message")
+            if message:
+                detail = clean_text(message, 700)
+    except Exception:
+        pass
+    return f"DeepSeek returned HTTP {response.status_code}: {detail or response.reason_phrase}"
+
+
+async def call_ai_json(
+    system_prompt: str,
+    user_payload: dict[str, Any],
+    max_tokens: int = 1000,
+    *,
+    required: bool = False,
+) -> dict[str, Any] | None:
     cfg = recovery_config()
     if not cfg["ai_api_key"]:
+        if required:
+            raise RecoveryAIUnavailable("AI_API_KEY is empty in the running environment.")
+        return None
+    if not cfg["ai_model"]:
+        if required:
+            raise RecoveryAIUnavailable("AI_MODEL is empty in the running environment.")
         return None
     payload = {
         "model": cfg["ai_model"],
@@ -381,24 +415,38 @@ async def call_ai_json(system_prompt: str, user_payload: dict[str, Any], max_tok
     try:
         async with httpx.AsyncClient(timeout=45) as client:
             response = await client.post(
-                f"{cfg['ai_base_url']}/chat/completions",
+                ai_chat_url(cfg["ai_base_url"]),
                 headers={"Authorization": f"Bearer {cfg['ai_api_key']}", "Content-Type": "application/json"},
                 json=payload,
             )
-        response.raise_for_status()
-        content = response.json()["choices"][0]["message"]["content"]
+        if response.status_code >= 400:
+            detail = ai_error_detail(response)
+            if required:
+                raise RecoveryAIUnavailable(detail)
+            logging.warning("Recovery AI request failed: %s", detail)
+            return None
+        try:
+            content = response.json()["choices"][0]["message"]["content"]
+        except Exception as exc:
+            if required:
+                raise RecoveryAIUnavailable("DeepSeek returned a response Retayn could not read.") from exc
+            logging.exception("Recovery AI response was not readable")
+            return None
         result = parse_ai_json(content)
+        if not isinstance(result, dict) and required:
+            raise RecoveryAIUnavailable("DeepSeek did not return valid JSON.")
         return result if isinstance(result, dict) else None
+    except RecoveryAIUnavailable:
+        raise
     except Exception:
         logging.exception("Recovery AI request failed")
+        if required:
+            raise RecoveryAIUnavailable("Retayn could not reach DeepSeek from the running server.")
         return None
 
 
 async def require_ai_json(system_prompt: str, user_payload: dict[str, Any], max_tokens: int = 1000) -> dict[str, Any]:
-    result = await call_ai_json(system_prompt, user_payload, max_tokens)
-    if not isinstance(result, dict):
-        raise RecoveryAIUnavailable("DeepSeek did not return a usable response.")
-    return result
+    return await call_ai_json(system_prompt, user_payload, max_tokens, required=True)
 
 
 def parse_ai_json(content: str) -> dict[str, Any] | None:
@@ -1570,6 +1618,30 @@ async def sync_telegram_recovery_api() -> JSONResponse:
     return JSONResponse(await sync_telegram_mtproto_responses())
 
 
+@router.get("/api/recovery/ai/health")
+async def recovery_ai_health_api() -> JSONResponse:
+    cfg = recovery_config()
+    payload: dict[str, Any] = {
+        "configured": bool(cfg["ai_api_key"] and cfg["ai_base_url"] and cfg["ai_model"]),
+        "api_key_present": bool(cfg["ai_api_key"]),
+        "base_url": cfg["ai_base_url"],
+        "chat_url": ai_chat_url(cfg["ai_base_url"]),
+        "model": cfg["ai_model"],
+        "ok": False,
+    }
+    try:
+        result = await require_ai_json(
+            "Return JSON exactly as {\"ok\":true}.",
+            {"check": "retayn_recovery_ai_health"},
+            max_tokens=40,
+        )
+        payload["ok"] = bool(result.get("ok") is True)
+        payload["message"] = "DeepSeek answered correctly." if payload["ok"] else "DeepSeek answered, but not with the expected JSON."
+    except RecoveryAIUnavailable as exc:
+        payload["message"] = str(exc)
+    return JSONResponse(payload, status_code=200 if payload["ok"] else 503)
+
+
 @router.post("/api/recovery/cases")
 async def create_recovery_case(request: Request) -> JSONResponse:
     form = await request.form()
@@ -1687,7 +1759,7 @@ async def create_recovery_case(request: Request) -> JSONResponse:
     try:
         draft = await generate_initial_draft(case, first_contact[0] if first_contact else None)
     except RecoveryAIUnavailable as exc:
-        raise HTTPException(503, "DeepSeek is required to draft the first recovery message. Check AI_API_KEY, AI_BASE_URL, and AI_MODEL, then try again.") from exc
+        raise HTTPException(503, f"DeepSeek could not draft the first recovery message: {exc}") from exc
     execute(
         "UPDATE recovery_cases SET draft_message=?, status='message_review', updated_at=? WHERE id=?",
         (draft, utc_now(), case_id),
@@ -1725,7 +1797,7 @@ async def regenerate_recovery_draft(case_id: int) -> JSONResponse:
     try:
         draft = await generate_initial_draft(case, first_contact[0] if first_contact else None)
     except RecoveryAIUnavailable as exc:
-        raise HTTPException(503, "DeepSeek is required to regenerate the recovery message. Check AI_API_KEY, AI_BASE_URL, and AI_MODEL, then try again.") from exc
+        raise HTTPException(503, f"DeepSeek could not regenerate the recovery message: {exc}") from exc
     execute(
         "UPDATE recovery_cases SET draft_message=?, status='message_review', updated_at=? WHERE id=?",
         (draft, utc_now(), case_id),
