@@ -28,8 +28,12 @@ Protection Map entries do not give Retayn API access by themselves. They are man
 - Google Workspace domains
 - Airtable bases
 - Zendesk Support accounts
+- Meta / Facebook, Instagram, and LinkedIn are listed as prepared connectors
+- Additional prepared connectors include GitLab, Bitbucket, Microsoft 365, Teams, Apple Developer, Google Play Console, npm, PyPI, Docker Hub, Google Cloud, AWS, Azure, Cloudflare, Vercel, Netlify, Supabase, Firebase, Stripe, PayPal, GoDaddy, Namecheap, Squarespace, Webflow, CircleCI, Buildkite, Heroku, DigitalOcean, Twilio, SendGrid, Mailchimp, HubSpot, Intercom, Calendly, Notion, Linear, Asana, Jira / Atlassian, WordPress, and Wix
 
 More connectors are expected later, so the UI is structured around `Overview` and `Connect an app` instead of a GitHub-only console.
+
+Prepared connectors appear in the dashboard catalog before live OAuth monitoring is implemented. To make one live, add the provider's OAuth start/callback route, token exchange, baseline collector, refresh logic, and comparison scan in `retayn_app.py`, then remove `coming_soon`.
 
 All six connectors establish a baseline and then poll continuously. Google Workspace, Airtable, and Zendesk OAuth credentials refresh automatically. Automatic remediation remains disabled for providers that do not expose a narrowly scoped, reversible action.
 
@@ -42,7 +46,7 @@ All six connectors establish a baseline and then poll continuously. Google Works
 - Airtable: base collaborators, permission changes, base reachability, tables, fields, and schema removal/addition
 - Zendesk: agents, administrators, role changes, suspension state, and API reachability
 
-Retayn creates a connection-health notification when provider access is interrupted and resolves it automatically after access is restored.
+Retayn records temporary connection-health interruptions internally and keeps them out of the notification list unless the provider keeps failing long enough to require reconnection.
 
 ## GitHub Monitoring
 
@@ -73,13 +77,24 @@ Keep `.env` for secrets only.
 
 Retayn stores sign-ins, connected apps, baselines, alerts, Protection Map records, recovery cases, OAuth tokens, and uploaded recovery evidence in SQLite files and upload folders under `RETAYN_DATA_DIR`.
 
-For Render, this must be a Persistent Disk mounted at `/data`, with:
+Retayn also sets a signed `retayn_session` cookie. It defaults to 180 days and can be changed with `RETAYN_SESSION_DAYS`. Keep `RETAYN_SESSION_SECRET` stable in production so the browser can stay signed in even if the free host restarts. The dashboard also keeps a browser-local backup of connected-app and Protection Map records. If a free host loses SQLite data, Retayn can show those remembered records again, but live monitoring and provider OAuth tokens still require either reconnecting the provider or using durable server storage.
+
+Do not put provider OAuth tokens, private keys, recovery evidence, or full baselines in cookies. Cookies are small and are sent with every request. Retayn uses the signed cookie only to remember who the owner is; remembered app cards are restored from the browser backup and clearly marked until the live provider connection is reauthorized.
+
+On a free host without durable storage, this is the expected behavior:
+
+- The signed cookie keeps the owner signed in.
+- The browser backup can show remembered app cards and Protection Map records again.
+- Live monitoring cannot resume until the provider is reconnected, because OAuth tokens must stay server-side and encrypted.
+
+If you later use durable storage, set `RETAYN_DATA_DIR` to that mounted path and keep `RETAYN_SESSION_SECRET` unchanged:
 
 ```text
 RETAYN_DATA_DIR=/data
+RETAYN_SESSION_DAYS=180
 ```
 
-The included `render.yaml` defines this disk. If the service was created manually or the disk is not attached to the Guard service, Render redeploys will erase the container filesystem and Retayn will look like it forgot everything. Keep one instance/worker while using SQLite, and migrate to managed Postgres/object storage before scaling horizontally.
+If the service has no durable storage, redeploys can erase SQLite and uploads. Keep one instance/worker while using SQLite, and migrate to managed Postgres/object storage before scaling horizontally.
 
 ## Adding Providers
 
@@ -118,6 +133,8 @@ Register these callback URLs with providers:
 - Google Workspace: `https://your-ngrok-domain/oauth/google-workspace/callback`
 - Airtable: `https://your-ngrok-domain/oauth/airtable/callback`
 - Zendesk: `https://your-ngrok-domain/oauth/zendesk/callback`
+- Meta / Facebook: `https://your-ngrok-domain/oauth/meta-facebook/callback`
+- LinkedIn: `https://your-ngrok-domain/oauth/linkedin/callback`
 
 Add provider app credentials to `.env`:
 
@@ -132,7 +149,83 @@ AIRTABLE_CLIENT_ID=
 AIRTABLE_CLIENT_SECRET=
 ZENDESK_CLIENT_ID=
 ZENDESK_CLIENT_SECRET=
+META_FACEBOOK_CLIENT_ID=
+META_FACEBOOK_CLIENT_SECRET=
+LINKEDIN_CLIENT_ID=
+LINKEDIN_CLIENT_SECRET=
 ```
+
+### Meta / Facebook and Instagram
+
+Use this for Facebook Pages, Meta Business assets, and Instagram Business or Creator accounts connected to a Facebook Page.
+
+1. Open `https://developers.facebook.com/apps` and create a Meta app for Retayn.
+2. Add Facebook Login or Facebook Login for Business, then open its settings.
+3. Add this valid OAuth redirect URI exactly: `https://YOUR_RETAYN_GUARD_DOMAIN/oauth/meta-facebook/callback`.
+4. Add your site domain in the app's basic settings.
+5. Request only the permissions Retayn needs first. Typical read-only starting permissions are `pages_show_list`, `pages_read_engagement`, `business_management`, and `instagram_basic`.
+6. In App Review, request advanced access for any permission that must work for users outside your app's admin/developer/tester roles.
+7. Put the app credentials in `guard/.env` as `META_FACEBOOK_CLIENT_ID` and `META_FACEBOOK_CLIENT_SECRET`.
+8. Implement `/oauth/meta-facebook/start` and `/oauth/meta-facebook/callback`.
+9. Exchange the callback code at Meta's OAuth token endpoint, store the token with Retayn's encrypted token storage, and create a baseline for Pages, admins, linked Instagram account, and business asset ownership.
+10. Add a scan function that compares current admins/assets to the baseline and opens Retayn events when ownership or admin access changes.
+
+### LinkedIn
+
+Use this for LinkedIn company Pages and organization admin access.
+
+1. Open `https://www.linkedin.com/developers/apps` and create a LinkedIn app.
+2. In the LinkedIn app `Auth` tab, copy the Client ID and Primary Client Secret.
+3. Add this authorized redirect URL exactly: `https://YOUR_RETAYN_GUARD_DOMAIN/oauth/linkedin/callback`.
+4. Add the least set of products/scopes you need. For sign-in/profile identity, use Sign In with LinkedIn using OpenID Connect scopes such as `openid`, `profile`, and `email`.
+5. For organization/Page administration monitoring, request LinkedIn Marketing Developer Platform access if available for your app. Organization authorization APIs use permissions such as `rw_organization_admin`, and availability depends on LinkedIn product approval.
+6. Put the app credentials in `guard/.env` as `LINKEDIN_CLIENT_ID` and `LINKEDIN_CLIENT_SECRET`.
+7. Implement `/oauth/linkedin/start` and `/oauth/linkedin/callback`.
+8. Send users to LinkedIn's OAuth authorization endpoint with `response_type=code`, your client ID, exact redirect URI, a CSRF `state`, and the scopes granted to your app.
+9. Exchange the authorization code for an access token, store it encrypted, then create a baseline for organization admins and Page authorization.
+10. Add a scan function that compares current organization/Page roles to the saved baseline and opens Retayn events when admin or publishing access changes.
+
+### Adding Any New API Connector
+
+1. Create the provider app in that provider's developer console.
+2. Add the Retayn callback URL: `https://YOUR_RETAYN_GUARD_DOMAIN/oauth/PROVIDER/callback`.
+3. Request the smallest read-only scopes needed to list users, roles, ownership, webhooks, domains, billing ownership, or deployment controls.
+4. Add the provider client ID/secret or app credentials to `guard/.env`.
+5. In `CONNECTORS`, add or update the connector entry with fields, monitoring labels, categories, and `install_env` if using a provider-hosted install URL.
+6. Add `/oauth/{provider}/start` logic to build the provider authorization URL and save OAuth state.
+7. Add `/oauth/{provider}/callback` logic to verify state, exchange the code, encrypt and store tokens, and save metadata.
+8. Add a `baseline_{provider}` function that stores the current admins, members, roles, tokens, domains, webhooks, or projects.
+9. Add a `scan_{provider}` function that compares the latest API result to the baseline and creates events for risky changes.
+10. Add safe remediation actions only when the provider exposes narrow, reversible API operations.
+11. Test locally through a public tunnel or deployed Guard URL because most OAuth providers require an HTTPS callback.
+
+### Prepared Connector Setup Shortcuts
+
+These prepared connectors are visible in the Retayn app list but disabled until their live OAuth/API code exists. Use the same pattern for each one:
+
+1. Create Retayn's app in the provider's developer console.
+2. Register `https://YOUR_RETAYN_GUARD_DOMAIN/oauth/CONNECTOR/callback` if the provider supports OAuth redirects.
+3. Request the least read-only scopes that list owners, admins, members, app permissions, domains, webhooks, API keys, release credentials, projects, deployments, or billing contacts.
+4. Add a future install URL env var named like `CONNECTOR_INSTALL_URL`.
+5. Add OAuth start/callback, token exchange, encrypted token storage, baseline collection, and scanning code.
+6. Remove `coming_soon` from that connector only after the install flow and baseline scan work end to end.
+
+Good first targets:
+
+- Meta / Facebook: Meta for Developers app, Facebook Login for Business, Graph API permissions for Pages, Business assets, and Instagram professional accounts.
+- LinkedIn: LinkedIn Developer app, Auth redirect URL, OpenID Connect scopes for identity, then Marketing Developer Platform access for organization/Page admin data.
+- GitLab: GitLab OAuth app with `read_api`; baseline groups, projects, members, deploy keys, protected branches, and project hooks.
+- Bitbucket: Bitbucket OAuth consumer; baseline workspaces, repository permissions, branch restrictions, webhooks, and app passwords where available.
+- Microsoft 365 / Teams: Microsoft Entra app registration with Microsoft Graph application permissions; baseline users, admins, groups, Teams owners, apps, and guests.
+- Apple Developer / App Store Connect: App Store Connect API key; baseline users, roles, certificates, identifiers, profiles, and apps.
+- Google Play Console: Google Cloud service account invited to Play Console; baseline users, permissions, service accounts, and apps.
+- npm / PyPI / Docker Hub: provider tokens or OAuth where available; baseline owners, maintainers, organizations, publish tokens, trusted publishers, and packages/images.
+- AWS / Azure / Google Cloud / DigitalOcean / Heroku: provider app or service principal; baseline IAM/users/roles, projects/resources, billing contacts, service accounts, config vars, and deployments.
+- Cloudflare / GoDaddy / Namecheap: API credentials or OAuth where available; baseline domains, DNS, account members, registrar lock, and billing/recovery contacts.
+- Vercel / Netlify / Supabase / Firebase / CircleCI / Buildkite: OAuth app or API app; baseline teams, projects, domains, deployments, build secrets, env vars, and deploy hooks.
+- Stripe / PayPal: developer app or business API access; baseline users, API keys/apps, webhooks, payout settings, and billing ownership.
+- HubSpot / Intercom / Zendesk / Mailchimp / SendGrid / Calendly / Notion / Linear / Asana / Jira: marketplace app/OAuth; baseline workspace admins, members, connected apps, domains, integrations, and operational ownership.
+- WordPress / Wix / Squarespace / Webflow: app/plugin/OAuth where available; baseline site admins, collaborators, domains, publishing permissions, plugins/themes, and billing ownership.
 
 ### Shopify
 
