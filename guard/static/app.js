@@ -29,6 +29,7 @@ let lastTelegramSyncAt = 0;
 let evidenceRowId = 0;
 let browserNotificationPermissionAsked = false;
 let notifiedEventIds = new Set();
+const dashboardBackupKey = "retayn_guard_dashboard_backup_v1";
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -89,6 +90,91 @@ function notifyNewEvents(events) {
       tag: `retayn-${event.id}`,
     });
   }
+}
+
+function readDashboardBackup() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(dashboardBackupKey) || "null");
+    if (!parsed || typeof parsed !== "object") return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function writeDashboardBackup(data) {
+  const accounts = Array.isArray(data.accounts) ? data.accounts : [];
+  const assets = Array.isArray(data.assets) ? data.assets : [];
+  if (!accounts.length && !assets.length) return;
+  const backup = {
+    saved_at: new Date().toISOString(),
+    accounts,
+    assets,
+  };
+  try {
+    localStorage.setItem(dashboardBackupKey, JSON.stringify(backup));
+  } catch (error) {
+    console.debug("Could not write Retayn browser backup", error);
+  }
+}
+
+function localProtectionMap(categories, accounts, assets) {
+  const categoryRows = (categories || []).map((category) => {
+    const connections = (accounts || [])
+      .filter((account) => (account.categories || []).includes(category.id))
+      .map((account) => ({ provider: connectorName(account), name: accountName(account), status: account.status || "remembered" }));
+    const trackedAssets = (assets || []).filter((asset) => asset.category === category.id);
+    const covered = connections.length + trackedAssets.length;
+    return {
+      ...category,
+      connections,
+      assets: trackedAssets,
+      status: covered ? "covered" : "gap",
+    };
+  });
+  const covered = categoryRows.filter((category) => category.status === "covered").length;
+  return {
+    categories: categoryRows,
+    covered,
+    total: categoryRows.length,
+    score: categoryRows.length ? Math.round((covered / categoryRows.length) * 100) : 0,
+    has_systems: Boolean((accounts || []).length || (assets || []).length),
+  };
+}
+
+function applyDashboardBackup(data) {
+  const hasServerRecords = Boolean((data.accounts || []).length || (data.assets || []).length);
+  if (hasServerRecords) {
+    writeDashboardBackup(data);
+    return data;
+  }
+  const backup = readDashboardBackup();
+  if (!backup || (!(backup.accounts || []).length && !(backup.assets || []).length)) return data;
+  const accounts = (backup.accounts || []).map((account) => ({
+    ...account,
+    status: "remembered",
+    local_only: true,
+  }));
+  const assets = backup.assets || [];
+  const protection = localProtectionMap(data.system_categories || [], accounts, assets);
+  return {
+    ...data,
+    accounts,
+    assets,
+    protection,
+    stats: {
+      ...(data.stats || {}),
+      accounts: accounts.length,
+      has_systems: protection.has_systems,
+      security_score: protection.score,
+      coverage: `${protection.covered}/${protection.total}`,
+      overall_security: "remembered",
+    },
+    browser_backup: {
+      restored: true,
+      saved_at: backup.saved_at,
+    },
+  };
 }
 
 function actionLabel(actionId) {
@@ -965,20 +1051,22 @@ function renderAccountDetail(account) {
   const monitoringList = (account.monitoring || []).map((item) => `<span>${escapeHtml(item)}</span>`).join("");
   const lastScan = baseline.last_scan || {};
   const actionDisabled = !account.action_support;
+  const localOnly = Boolean(account.local_only);
   target.innerHTML = `
     <div class="panel-head">
       <h2>${escapeHtml(accountName(account))}</h2>
       <span class="status-pill ${account.status === "error" ? "danger" : ""}">${escapeHtml(account.status)}</span>
     </div>
+    ${localOnly ? `<div class="system-warning compact-warning"><strong>Browser backup only</strong>This app record was remembered by your browser after the backend data reset. Reconnect it to resume live monitoring.</div>` : ""}
     <div class="monitoring-summary">
       <div><strong>${escapeHtml(connectorName(account))}</strong><div class="capability-list">${monitoringList || "Connection health"}</div></div>
       <small>Last check: ${escapeHtml(lastScan.at || account.updated_at || "Not yet checked")}</small>
     </div>
-    <form class="inline-form ${account.connector === "github" ? "" : "hidden"}" onsubmit="editAccount(event, ${account.id})">
+    <form class="inline-form ${account.connector === "github" && !localOnly ? "" : "hidden"}" onsubmit="editAccount(event, ${account.id})">
       <input name="repo" value="${escapeHtml(`${account.owner}/${account.repo}`)}" required />
       <button type="submit" class="secondary">Save</button>
     </form>
-    <form class="settings-grid app-settings-form" onsubmit="saveAccountSettings(event, ${account.id})">
+    <form class="settings-grid app-settings-form ${localOnly ? "hidden" : ""}" onsubmit="saveAccountSettings(event, ${account.id})">
       <label class="toggle-label ${actionDisabled ? "disabled-setting" : ""}"><input name="auto_action_enabled" type="checkbox" ${settings.auto_action_enabled && !actionDisabled ? "checked" : ""} ${actionDisabled ? "disabled" : ""} /> Take supported action if untouched ${actionDisabled ? "<small>Coming soon for this app</small>" : ""}</label>
       <label class="toggle-label"><input name="windows_notifications" type="checkbox" ${settings.windows_notifications ? "checked" : ""} /> Windows notifications</label>
       <label>Untouched delay, minutes<input name="auto_action_delay_minutes" type="number" min="1" step="1" value="${escapeHtml(settings.auto_action_delay_minutes || 30)}" /></label>
@@ -1322,10 +1410,14 @@ async function deleteAsset(assetId) {
 
 async function loadOverview() {
   const response = await fetch("/api/overview");
-  const data = await response.json();
+  let data = await response.json();
+  data = applyDashboardBackup(data);
   lastData = data;
   const persistenceWarning = $("#persistenceWarning");
-  if (data.persistence?.risky) {
+  if (data.browser_backup?.restored) {
+    persistenceWarning.innerHTML = `<strong>Restored from this browser</strong>${escapeHtml(`These app records were restored from this browser's backup from ${data.browser_backup.saved_at || "earlier"}. Live monitoring and OAuth tokens need a persistent backend or reconnection.`)}`;
+    persistenceWarning.classList.remove("hidden");
+  } else if (data.persistence?.risky) {
     persistenceWarning.innerHTML = `<strong>Storage is not persistent</strong>${escapeHtml(data.persistence.message || "Retayn data may be reset after deploy.")}`;
     persistenceWarning.classList.remove("hidden");
   } else {
