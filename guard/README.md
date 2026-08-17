@@ -120,6 +120,8 @@ Retayn is a retail product, so customers should not be asked to create API token
 5. Retayn stores the resulting server-side credential.
 6. The customer enters only a simple identifier when needed, such as a shop domain, Workspace domain, base URL, or Zendesk subdomain.
 
+For the full per-app developer setup checklist, see `API_SETUP.md`.
+
 This local prototype now has OAuth start/callback routes and stores returned tokens in SQLite. Set `RETAYN_PUBLIC_BASE_URL` to your current ngrok origin, for example:
 
 ```env
