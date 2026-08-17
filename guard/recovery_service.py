@@ -53,6 +53,10 @@ RESPONSE_CLASSIFICATIONS = {
 }
 
 
+class RecoveryAIUnavailable(RuntimeError):
+    pass
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -314,6 +318,17 @@ def create_recovery_event(case_id: int, event_type: str, severity: str, title: s
     return event_id
 
 
+def create_recovery_ai_review_event(case: dict[str, Any], contact: dict[str, Any], message_id: int, body: str) -> None:
+    create_recovery_event(
+        case["id"],
+        "recovery_ai_review_needed",
+        "medium",
+        "Recovery reply needs review",
+        f"DeepSeek could not safely draft an automatic reply to {contact['name']}. Review the message before responding.",
+        {"contact_id": contact["id"], "message_id": message_id, "contact_name": contact["name"], "incoming_message": body},
+    )
+
+
 def case_fact_record(case: dict[str, Any]) -> dict[str, Any]:
     evidence = rows(
         "SELECT label, original_name, source FROM recovery_files WHERE case_id=? AND source='owner' ORDER BY created_at",
@@ -377,6 +392,13 @@ async def call_ai_json(system_prompt: str, user_payload: dict[str, Any], max_tok
     except Exception:
         logging.exception("Recovery AI request failed")
         return None
+
+
+async def require_ai_json(system_prompt: str, user_payload: dict[str, Any], max_tokens: int = 1000) -> dict[str, Any]:
+    result = await call_ai_json(system_prompt, user_payload, max_tokens)
+    if not isinstance(result, dict):
+        raise RecoveryAIUnavailable("DeepSeek did not return a usable response.")
+    return result
 
 
 def parse_ai_json(content: str) -> dict[str, Any] | None:
@@ -545,7 +567,7 @@ async def review_outbound_message_safety(message: str, case: dict[str, Any] | No
     heuristic = heuristic_outbound_message_review(message)
     if heuristic["decision"] == "block":
         return heuristic
-    result = await call_ai_json(
+    result = await require_ai_json(
         "You are Retayn's outbound safety reviewer. Review this owner-editable recovery message before it is saved "
         "or sent. Be permissive for legitimate access recovery, even if the owner is frustrated. Block only "
         "high-confidence spam, trolling, harassment, threats, extortion, phishing, malware, credential theft, mass "
@@ -564,17 +586,20 @@ async def review_outbound_message_safety(message: str, case: dict[str, Any] | No
         },
         max_tokens=350,
     )
-    decision = clean_text((result or {}).get("decision"), 20).casefold()
+    decision = clean_text(result.get("decision"), 20).casefold()
     if decision == "block":
         return {
             "decision": "block",
-            "owner_message": clean_text((result or {}).get("owner_message"), 700) or "Retayn blocked this message because it looks unsafe to send.",
+            "owner_message": clean_text(result.get("owner_message"), 700) or "Retayn blocked this message because it looks unsafe to send.",
         }
     return heuristic
 
 
 async def ensure_outbound_message_safe(message: str, case: dict[str, Any] | None = None, contact: dict[str, Any] | None = None) -> None:
-    review = await review_outbound_message_safety(message, case, contact)
+    try:
+        review = await review_outbound_message_safety(message, case, contact)
+    except RecoveryAIUnavailable as exc:
+        raise HTTPException(503, "DeepSeek is required to review recovery messages before Retayn saves or sends them. Check AI_API_KEY, AI_BASE_URL, and AI_MODEL.") from exc
     if review["decision"] == "block":
         raise HTTPException(400, review["owner_message"])
 
@@ -590,7 +615,7 @@ async def generate_initial_draft(case: dict[str, Any], contact: dict[str, Any] |
         "notes": clean_text((contact or {}).get("notes")),
     } if contact else {}
     message_facts = {**facts, "contact": contact_record}
-    result = await call_ai_json(
+    result = await require_ai_json(
         "Draft a professional first recovery request to the supplied contact using only the supplied record. "
         "Address the contact by their actual name when provided. Do not address the platform support team unless "
         "the contact name itself is that support team. Never invent a fact, document, "
@@ -604,10 +629,10 @@ async def generate_initial_draft(case: dict[str, Any], contact: dict[str, Any] |
         {"recovery_record": facts, "contact": contact_record},
         max_tokens=900,
     )
-    candidate = enforce_contact_greeting(remove_emoji_and_emdash(clean_text((result or {}).get("message"), 12000)), contact)
+    candidate = enforce_contact_greeting(remove_emoji_and_emdash(clean_text(result.get("message"), 12000)), contact)
     if meaningful_recovery_message(candidate) and await verify_fact_locked_message(candidate, message_facts):
         return candidate
-    return fallback_recovery_draft(case, contact)
+    raise RecoveryAIUnavailable("DeepSeek returned a weak or unsupported first draft.")
 
 
 async def personalize_recovery_message(case: dict[str, Any], contact: dict[str, Any], reviewed_message: str) -> str:
@@ -621,7 +646,7 @@ async def personalize_recovery_message(case: dict[str, Any], contact: dict[str, 
         "notes": clean_text(contact.get("notes")),
     }
     message_facts = {**facts, "contact": contact_record}
-    result = await call_ai_json(
+    result = await require_ai_json(
         "Personalize the reviewed recovery message for this exact contact using only the supplied record, contact, "
         "and reviewed message. Preserve the owner-approved facts and request. Change the greeting and wording so it "
         "fits the contact's name, role, organization, notes, and channel. Do not add new claims, documents, threats, "
@@ -630,10 +655,10 @@ async def personalize_recovery_message(case: dict[str, Any], contact: dict[str, 
         {"recovery_record": facts, "contact": contact_record, "reviewed_message": reviewed_message},
         max_tokens=900,
     )
-    candidate = enforce_contact_greeting(remove_emoji_and_emdash(clean_text((result or {}).get("message"), 12000)), contact)
+    candidate = enforce_contact_greeting(remove_emoji_and_emdash(clean_text(result.get("message"), 12000)), contact)
     if meaningful_recovery_message(candidate) and await verify_fact_locked_message(candidate, message_facts):
         return candidate
-    return fallback_recovery_draft(case, contact)
+    raise RecoveryAIUnavailable("DeepSeek returned a weak or unsupported personalized message.")
 
 
 def fallback_closing_message(case: dict[str, Any], contact: dict[str, Any], reason: str) -> str:
@@ -750,8 +775,11 @@ async def review_recovery_case_for_abuse(payload: dict[str, Any]) -> dict[str, A
 
 def heuristic_classification(body: str, has_files: bool = False) -> str:
     text = body.casefold()
+    compact = re.sub(r"[^a-z0-9]+", " ", text).strip()
     if has_files or any(term in text for term in ("attached the files", "here are the files", "download link", "source files attached")):
         return "files_shared"
+    if compact in {"no", "nope", "nah", "not doing that", "i cannot", "i cant", "cant", "cannot"}:
+        return "rejection"
     if any(term in text for term in (
         "account name",
         "account username",
@@ -857,7 +885,7 @@ async def classify_response(body: str, has_files: bool = False) -> str:
 
 async def generate_generic_followup(case: dict[str, Any], incoming: str) -> str:
     facts = case_fact_record(case)
-    result = await call_ai_json(
+    result = await require_ai_json(
         "Write one concise professional follow-up to the contact's routine response. Use only facts in the recovery "
         "record and the incoming message. Never claim an action happened unless it is in the record. Do not use em "
         "dashes or emojis. If the contact says they are checking or looking into it, respond naturally with a short "
@@ -865,10 +893,10 @@ async def generate_generic_followup(case: dict[str, Any], incoming: str) -> str:
         {"recovery_record": facts, "incoming_message": incoming},
         max_tokens=500,
     )
-    candidate = remove_emoji_and_emdash(clean_text((result or {}).get("message"), 5000))
+    candidate = remove_emoji_and_emdash(clean_text(result.get("message"), 5000))
     if candidate and await verify_fact_locked_message(candidate, facts):
         return candidate
-    return "Thank you for the update. Please let us know the next required step and whether you need any specific ownership evidence from us."
+    raise RecoveryAIUnavailable("DeepSeek returned a weak or unsupported routine follow-up.")
 
 
 def routine_acknowledgement(body: str) -> bool:
@@ -891,7 +919,7 @@ def routine_acknowledgement(body: str) -> bool:
 
 async def generate_recovery_followup(case: dict[str, Any], incoming: str, purpose: str) -> str:
     facts = case_fact_record(case)
-    result = await call_ai_json(
+    result = await require_ai_json(
         "Write a concise professional recovery follow-up using only the supplied record and incoming message. "
         "Do not invent proof, documents, access, actions, or claims. If the contact asks what account to restore or "
         "invite, provide the account identifier from the record directly. If the contact asks for basic known facts "
@@ -902,10 +930,10 @@ async def generate_recovery_followup(case: dict[str, Any], incoming: str, purpos
         {"recovery_record": facts, "incoming_message": incoming, "purpose": purpose},
         max_tokens=650,
     )
-    candidate = remove_emoji_and_emdash(clean_text((result or {}).get("message"), 5000))
+    candidate = remove_emoji_and_emdash(clean_text(result.get("message"), 5000))
     if candidate and await verify_fact_locked_message(candidate, facts):
         return candidate
-    return fallback_recovery_followup(case, incoming, purpose)
+    raise RecoveryAIUnavailable("DeepSeek returned a weak or unsupported recovery follow-up.")
 
 
 def fallback_recovery_followup(case: dict[str, Any], incoming: str, purpose: str) -> str:
@@ -1467,8 +1495,11 @@ async def process_inbound_message(
     if classification == "proof_request":
         contact_status = "needs_info"
         case_status = "needs_owner"
-        draft = await generate_recovery_followup(case, body, "proof_request")
-        insert_message(case["id"], contact["id"], "outbound", "agent", draft, "draft", classification="proof_response")
+        try:
+            draft = await generate_recovery_followup(case, body, "proof_request")
+            insert_message(case["id"], contact["id"], "outbound", "agent", draft, "draft", classification="proof_response")
+        except RecoveryAIUnavailable:
+            create_recovery_ai_review_event(case, contact, message_id, body)
         create_recovery_event(
             case["id"], "recovery_proof_requested", "high", "More recovery proof is needed",
             f"{contact['name']} asked for more ownership evidence in {case['title']}.",
@@ -1477,13 +1508,21 @@ async def process_inbound_message(
     elif classification == "account_info_request":
         contact_status = "responded"
         case_status = "outreach_active"
-        followup = await generate_recovery_followup(case, body, "account_info_request")
-        await send_and_record(case, contact, followup, sender_type="agent", initial=False)
+        try:
+            followup = await generate_recovery_followup(case, body, "account_info_request")
+            await send_and_record(case, contact, followup, sender_type="agent", initial=False)
+        except RecoveryAIUnavailable:
+            case_status = "needs_owner"
+            create_recovery_ai_review_event(case, contact, message_id, body)
     elif classification == "case_fact_request":
         contact_status = "responded"
         case_status = "outreach_active"
-        followup = await generate_recovery_followup(case, body, "case_fact_request")
-        await send_and_record(case, contact, followup, sender_type="agent", initial=False)
+        try:
+            followup = await generate_recovery_followup(case, body, "case_fact_request")
+            await send_and_record(case, contact, followup, sender_type="agent", initial=False)
+        except RecoveryAIUnavailable:
+            case_status = "needs_owner"
+            create_recovery_ai_review_event(case, contact, message_id, body)
     elif classification in {"access_offer", "files_shared"}:
         contact_status = "success"
         case_status = "action_required"
@@ -1495,8 +1534,12 @@ async def process_inbound_message(
             {"contact_id": contact["id"], "message_id": message_id, "contact_name": contact["name"], "incoming_message": body, "file_ids": [item["id"] for item in saved_files]},
         )
     elif classification == "generic" and bool(case.get("auto_reply_generic")) and not contact_has_pending_draft(contact["id"]):
-        followup = await generate_generic_followup(case, body)
-        await send_and_record(case, contact, followup, sender_type="agent", initial=False)
+        try:
+            followup = await generate_generic_followup(case, body)
+            await send_and_record(case, contact, followup, sender_type="agent", initial=False)
+        except RecoveryAIUnavailable:
+            case_status = "needs_owner"
+            create_recovery_ai_review_event(case, contact, message_id, body)
     elif classification == "rejection":
         case_status = "needs_owner"
         create_recovery_event(
@@ -1641,7 +1684,10 @@ async def create_recovery_case(request: Request) -> JSONResponse:
         await save_upload(upload, case_id, "owner", labels[index] if index < len(labels) else "")
     case = row("SELECT * FROM recovery_cases WHERE id=?", (case_id,)) or {}
     first_contact = rows("SELECT * FROM recovery_contacts WHERE case_id=? ORDER BY created_at LIMIT 1", (case_id,))
-    draft = await generate_initial_draft(case, first_contact[0] if first_contact else None)
+    try:
+        draft = await generate_initial_draft(case, first_contact[0] if first_contact else None)
+    except RecoveryAIUnavailable as exc:
+        raise HTTPException(503, "DeepSeek is required to draft the first recovery message. Check AI_API_KEY, AI_BASE_URL, and AI_MODEL, then try again.") from exc
     execute(
         "UPDATE recovery_cases SET draft_message=?, status='message_review', updated_at=? WHERE id=?",
         (draft, utc_now(), case_id),
@@ -1676,7 +1722,10 @@ async def regenerate_recovery_draft(case_id: int) -> JSONResponse:
     if case["status"] in {"outreach_active", "action_required", "recovered", "closed"}:
         raise HTTPException(400, "The first message cannot be regenerated after outreach starts.")
     first_contact = rows("SELECT * FROM recovery_contacts WHERE case_id=? ORDER BY created_at LIMIT 1", (case_id,))
-    draft = await generate_initial_draft(case, first_contact[0] if first_contact else None)
+    try:
+        draft = await generate_initial_draft(case, first_contact[0] if first_contact else None)
+    except RecoveryAIUnavailable as exc:
+        raise HTTPException(503, "DeepSeek is required to regenerate the recovery message. Check AI_API_KEY, AI_BASE_URL, and AI_MODEL, then try again.") from exc
     execute(
         "UPDATE recovery_cases SET draft_message=?, status='message_review', updated_at=? WHERE id=?",
         (draft, utc_now(), case_id),
@@ -1698,6 +1747,20 @@ async def approve_recovery_outreach(case_id: int, request: Request) -> JSONRespo
     if not contacts:
         raise HTTPException(400, "Add at least one recovery contact before starting outreach.")
     await ensure_outbound_message_safe(message, case, contacts[0])
+    first_contact_id = contacts[0]["id"] if contacts else None
+    pending_messages: list[tuple[dict[str, Any], str]] = []
+    for contact in contacts:
+        already_sent = row(
+            "SELECT id FROM recovery_messages WHERE contact_id=? AND direction='outbound' AND status IN ('sent','manual_required','waiting_setup') LIMIT 1",
+            (contact["id"],),
+        )
+        if already_sent:
+            continue
+        try:
+            contact_message = message if contact["id"] == first_contact_id else await personalize_recovery_message(case, contact, message)
+        except RecoveryAIUnavailable as exc:
+            raise HTTPException(503, f"DeepSeek could not personalize the message for {contact['name']}. No outreach was started.") from exc
+        pending_messages.append((contact, contact_message))
     execute(
         "UPDATE recovery_cases SET approved_message=?, status='outreach_active', updated_at=? WHERE id=?",
         (message, utc_now(), case_id),
@@ -1705,15 +1768,8 @@ async def approve_recovery_outreach(case_id: int, request: Request) -> JSONRespo
     case["approved_message"] = message
     case["status"] = "outreach_active"
     files = case_owner_files(case_id) if bool(case.get("share_evidence_initially")) else []
-    first_contact_id = contacts[0]["id"] if contacts else None
-    for contact in contacts:
-        already_sent = row(
-            "SELECT id FROM recovery_messages WHERE contact_id=? AND direction='outbound' AND status IN ('sent','manual_required','waiting_setup') LIMIT 1",
-            (contact["id"],),
-        )
-        if not already_sent:
-            contact_message = message if contact["id"] == first_contact_id else await personalize_recovery_message(case, contact, message)
-            await send_and_record(case, contact, contact_message, files=files, initial=True)
+    for contact, contact_message in pending_messages:
+        await send_and_record(case, contact, contact_message, files=files, initial=True)
     return JSONResponse(get_recovery_case(case_id))
 
 
