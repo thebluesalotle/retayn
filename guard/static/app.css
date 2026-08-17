@@ -537,6 +537,12 @@ strong {
   text-transform: uppercase;
 }
 
+.compact-warning {
+  margin: 0 0 18px;
+  padding: 12px 14px;
+  font-size: 12px;
+}
+
 .panel {
   min-width: 0;
   padding: 20px;

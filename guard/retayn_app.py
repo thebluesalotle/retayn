@@ -203,6 +203,113 @@ CONNECTORS: dict[str, dict[str, Any]] = {
 }
 
 
+def prepared_connector(
+    name: str,
+    description: str,
+    categories: list[str],
+    monitoring: list[str],
+    field_name: str = "account_url",
+    field_label: str = "Account or workspace URL",
+    placeholder: str = "https://",
+    help_text: str = "Paste the admin URL or account identifier for the system you want Retayn to protect.",
+) -> dict[str, Any]:
+    return {
+        "name": name,
+        "description": description,
+        "coming_soon": True,
+        "categories": categories,
+        "monitoring": monitoring,
+        "actions": [],
+        "fields": [
+            {
+                "name": field_name,
+                "label": field_label,
+                "placeholder": placeholder,
+                "secret": False,
+                "help": help_text,
+            }
+        ],
+    }
+
+
+CONNECTORS.update(
+    {
+        "meta_facebook": prepared_connector(
+            "Meta / Facebook",
+            "Monitor Facebook Pages, Business assets, admins, roles, and connected Instagram accounts.",
+            ["identity_operations", "domains_billing"],
+            ["Business assets", "Facebook Pages", "Page admins", "Role changes", "Connected Instagram accounts"],
+            "business_or_page_url",
+            "Business Manager or Page URL",
+            "https://business.facebook.com/latest/settings/...",
+            "Use the Meta Business Suite account or Facebook Page URL that owns your brand assets.",
+        ),
+        "instagram": prepared_connector(
+            "Instagram",
+            "Monitor Instagram professional account ownership, linked Page state, admins, and publishing access.",
+            ["identity_operations", "publisher_accounts"],
+            ["Professional account identity", "Linked Facebook Page", "Publishing access", "Admin access"],
+            "instagram_handle",
+            "Instagram handle or profile URL",
+            "@yourbrand",
+            "Use a Business or Creator Instagram account connected to a Facebook Page.",
+        ),
+        "linkedin": prepared_connector(
+            "LinkedIn",
+            "Monitor LinkedIn Page administration, organization authorization, and publishing access.",
+            ["identity_operations", "publisher_accounts"],
+            ["Organization admins", "Page authorization", "Publishing access", "Member authorization"],
+            "organization_url",
+            "LinkedIn Page URL",
+            "https://www.linkedin.com/company/your-company/",
+            "Use the LinkedIn company Page or organization URL you need to keep under owner control.",
+        ),
+        "gitlab": prepared_connector("GitLab", "Monitor groups, projects, members, access tokens, deploy keys, and protected branches.", ["source_code", "release_pipeline"], ["Group members", "Project members", "Protected branches", "Deploy keys", "Access tokens"], "project_url", "GitLab project or group URL", "https://gitlab.com/group/project"),
+        "bitbucket": prepared_connector("Bitbucket", "Monitor workspaces, repositories, groups, branch restrictions, and app passwords.", ["source_code", "release_pipeline"], ["Workspace members", "Repository access", "Branch restrictions", "App passwords"], "workspace_url", "Bitbucket workspace or repo URL", "https://bitbucket.org/workspace/repo"),
+        "microsoft_365": prepared_connector("Microsoft 365", "Monitor Entra ID users, admins, groups, app registrations, and recovery ownership.", ["identity_operations", "cloud_data"], ["Users", "Admins", "Groups", "App registrations", "Tenant access"], "tenant_domain", "Tenant domain", "example.onmicrosoft.com"),
+        "teams": prepared_connector("Microsoft Teams", "Monitor team owners, members, guest access, and workspace control.", ["identity_operations"], ["Team owners", "Members", "Guests", "External access"], "team_url", "Teams team URL or name", "Product team"),
+        "google_cloud": prepared_connector("Google Cloud", "Monitor projects, IAM bindings, service accounts, billing, and deployment access.", ["cloud_data", "release_pipeline"], ["IAM bindings", "Service accounts", "Billing", "Projects", "Deployments"], "project_id", "Google Cloud project ID", "my-production-project"),
+        "aws": prepared_connector("AWS", "Monitor account users, IAM roles, root safety, billing contacts, and critical infrastructure.", ["cloud_data", "domains_billing"], ["IAM users", "Roles", "Root account safety", "Billing contacts", "Cloud resources"], "account_id", "AWS account ID", "123456789012"),
+        "azure": prepared_connector("Azure", "Monitor subscriptions, Entra roles, resource groups, and production infrastructure.", ["cloud_data", "identity_operations"], ["Subscriptions", "Role assignments", "Resource groups", "App registrations"], "subscription_id", "Azure subscription ID", "00000000-0000-0000-0000-000000000000"),
+        "cloudflare": prepared_connector("Cloudflare", "Monitor domains, DNS, zones, workers, pages, account members, and registrar control.", ["domains_billing", "cloud_data"], ["Account members", "Zones", "DNS records", "Workers", "Registrar access"], "zone_name", "Domain or zone", "example.com"),
+        "vercel": prepared_connector("Vercel", "Monitor teams, projects, domains, deployments, env vars, and production access.", ["cloud_data", "release_pipeline", "domains_billing"], ["Team members", "Projects", "Domains", "Deployments", "Environment access"], "project_url", "Vercel project URL", "https://vercel.com/team/project"),
+        "netlify": prepared_connector("Netlify", "Monitor teams, sites, domains, deploy hooks, environment variables, and production access.", ["cloud_data", "release_pipeline", "domains_billing"], ["Team members", "Sites", "Domains", "Deploy hooks", "Environment access"], "site_url", "Netlify site URL", "https://app.netlify.com/sites/site-name"),
+        "supabase": prepared_connector("Supabase", "Monitor organizations, projects, database ownership, API keys, and team access.", ["cloud_data"], ["Organization members", "Projects", "API keys", "Database access"], "project_url", "Supabase project URL", "https://supabase.com/dashboard/project/..."),
+        "firebase": prepared_connector("Firebase", "Monitor Firebase projects, users, service accounts, app distribution, and hosting.", ["cloud_data", "release_pipeline"], ["Project users", "Service accounts", "Hosting", "App distribution"], "project_id", "Firebase project ID", "my-firebase-project"),
+        "stripe": prepared_connector("Stripe", "Monitor account roles, API keys, webhooks, payout settings, and payment ownership.", ["domains_billing"], ["Team roles", "API keys", "Webhooks", "Payout settings", "Account ownership"], "account_url", "Stripe account URL", "https://dashboard.stripe.com/"),
+        "paypal": prepared_connector("PayPal", "Monitor business account users, app credentials, payout access, and payment ownership.", ["domains_billing"], ["Users", "API apps", "Payout access", "Business settings"], "account_email", "PayPal business email", "payments@example.com"),
+        "notion": prepared_connector("Notion", "Monitor workspace members, owners, integrations, shared pages, and knowledge-base control.", ["identity_operations", "cloud_data"], ["Workspace members", "Owners", "Integrations", "Shared pages"], "workspace_url", "Notion workspace URL", "https://www.notion.so/your-workspace"),
+        "linear": prepared_connector("Linear", "Monitor workspace admins, members, integrations, teams, and operational ownership.", ["identity_operations"], ["Admins", "Members", "Integrations", "Teams"], "workspace_url", "Linear workspace URL", "https://linear.app/company"),
+        "asana": prepared_connector("Asana", "Monitor workspace admins, members, guests, projects, and operational handoff risk.", ["identity_operations"], ["Admins", "Members", "Guests", "Projects"], "workspace_url", "Asana workspace URL", "https://app.asana.com/0/home/..."),
+        "jira": prepared_connector("Jira / Atlassian", "Monitor site admins, groups, projects, apps, and operational access.", ["identity_operations", "release_pipeline"], ["Site admins", "Groups", "Projects", "Apps"], "site_url", "Atlassian site URL", "https://yourcompany.atlassian.net"),
+        "wordpress": prepared_connector("WordPress", "Monitor administrators, plugins, domains, hosting settings, and site control.", ["cloud_data", "domains_billing"], ["Administrators", "Plugins", "Themes", "Domains", "Site health"], "site_url", "WordPress site URL", "https://example.com/wp-admin"),
+        "wix": prepared_connector("Wix", "Monitor site collaborators, domain ownership, business settings, and storefront control.", ["cloud_data", "domains_billing"], ["Collaborators", "Domains", "Business settings", "Store access"], "site_url", "Wix site URL", "https://manage.wix.com/dashboard/..."),
+        "apple_developer": prepared_connector("Apple Developer", "Monitor developer team roles, certificates, identifiers, app records, and release authority.", ["publisher_accounts", "signing_materials"], ["Team members", "Roles", "Certificates", "Identifiers", "App Store Connect access"], "team_id", "Apple Developer team ID", "ABCD123456"),
+        "google_play": prepared_connector("Google Play Console", "Monitor developer account users, app permissions, service accounts, and release access.", ["publisher_accounts", "release_pipeline"], ["Account users", "App permissions", "Service accounts", "Release access"], "package_name", "Android package name or Play app URL", "com.example.app"),
+        "npm": prepared_connector("npm", "Monitor package maintainers, organization owners, automation tokens, and publish access.", ["publisher_accounts", "release_pipeline"], ["Package maintainers", "Organization owners", "Automation tokens", "Publish access"], "package_name", "Package or organization", "@company/package"),
+        "pypi": prepared_connector("PyPI", "Monitor project owners, maintainers, trusted publishing, and release tokens.", ["publisher_accounts", "release_pipeline"], ["Project owners", "Maintainers", "Trusted publishers", "API tokens"], "project_name", "PyPI project name", "your-package"),
+        "docker_hub": prepared_connector("Docker Hub", "Monitor organizations, teams, repositories, access tokens, and image publishing.", ["publisher_accounts", "release_pipeline"], ["Organization owners", "Teams", "Repositories", "Access tokens"], "repository_url", "Docker Hub repository URL", "https://hub.docker.com/r/company/image"),
+        "godaddy": prepared_connector("GoDaddy", "Monitor domain ownership, DNS, delegated access, and renewal or billing controls.", ["domains_billing"], ["Domains", "DNS", "Delegated access", "Billing controls"], "domain", "Domain name", "example.com"),
+        "namecheap": prepared_connector("Namecheap", "Monitor domains, DNS, account contacts, two-factor state, and renewal controls.", ["domains_billing"], ["Domains", "DNS", "Account contacts", "Renewals"], "domain", "Domain name", "example.com"),
+        "squarespace": prepared_connector("Squarespace", "Monitor site contributors, domains, billing, and store access.", ["cloud_data", "domains_billing"], ["Contributors", "Domains", "Billing", "Store access"], "site_url", "Squarespace site URL", "https://example.com"),
+        "webflow": prepared_connector("Webflow", "Monitor workspace members, site roles, publishing access, domains, and billing.", ["cloud_data", "domains_billing", "release_pipeline"], ["Workspace members", "Site roles", "Publishing access", "Domains"], "site_url", "Webflow site URL", "https://webflow.com/dashboard/sites/..."),
+        "circleci": prepared_connector("CircleCI", "Monitor organization users, contexts, env vars, projects, and deploy controls.", ["release_pipeline"], ["Organization users", "Contexts", "Environment variables", "Projects"], "organization_slug", "CircleCI organization", "gh/company"),
+        "buildkite": prepared_connector("Buildkite", "Monitor organization members, teams, agents, pipelines, and deploy secrets.", ["release_pipeline"], ["Members", "Teams", "Agents", "Pipelines", "Secrets"], "organization_slug", "Buildkite organization", "company"),
+        "heroku": prepared_connector("Heroku", "Monitor teams, apps, collaborators, pipelines, config vars, and add-on access.", ["cloud_data", "release_pipeline"], ["Team members", "Apps", "Collaborators", "Pipelines", "Config vars"], "app_name", "Heroku app or team", "your-app"),
+        "digitalocean": prepared_connector("DigitalOcean", "Monitor team members, projects, droplets, databases, domains, and API tokens.", ["cloud_data", "domains_billing"], ["Team members", "Projects", "Droplets", "Databases", "API tokens"], "team_name", "DigitalOcean team", "company"),
+        "twilio": prepared_connector("Twilio", "Monitor account users, subaccounts, API keys, phone numbers, and billing access.", ["cloud_data", "domains_billing"], ["Users", "Subaccounts", "API keys", "Phone numbers", "Billing access"], "account_sid", "Twilio account SID", "ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"),
+        "sendgrid": prepared_connector("SendGrid", "Monitor users, API keys, senders, domains, and email delivery control.", ["cloud_data", "domains_billing"], ["Users", "API keys", "Senders", "Authenticated domains"], "account_email", "SendGrid account email", "admin@example.com"),
+        "mailchimp": prepared_connector("Mailchimp", "Monitor account users, audiences, API keys, sending domains, and billing.", ["identity_operations", "domains_billing"], ["Users", "Audiences", "API keys", "Sending domains"], "account_email", "Mailchimp account email", "marketing@example.com"),
+        "hubspot": prepared_connector("HubSpot", "Monitor users, super admins, connected apps, domains, forms, and CRM ownership.", ["identity_operations", "domains_billing"], ["Users", "Super admins", "Connected apps", "Domains"], "portal_id", "HubSpot portal ID", "12345678"),
+        "intercom": prepared_connector("Intercom", "Monitor workspace admins, teammates, apps, inboxes, and customer support control.", ["identity_operations"], ["Admins", "Teammates", "Apps", "Inboxes"], "workspace_name", "Intercom workspace", "Company support"),
+        "calendly": prepared_connector("Calendly", "Monitor organization admins, users, integrations, routing forms, and booking ownership.", ["identity_operations"], ["Admins", "Users", "Integrations", "Routing forms"], "organization_url", "Calendly organization URL", "https://calendly.com/organization/..."),
+    }
+)
+
+for connector_id, connector in CONNECTORS.items():
+    connector.setdefault("install_env", f"{connector_id.upper()}_INSTALL_URL")
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -739,7 +846,7 @@ def connector_definitions() -> list[dict[str, Any]]:
             install_url = github_install_url()
             install_ready = bool(install_url)
         else:
-            configured_url = cfg.get(str(item.get("install_env", "")).lower(), "")
+            configured_url = os.getenv(str(item.get("install_env", "")).strip(), "").strip()
             install_url = f"/oauth/{connector_path(connector_id)}/start" if oauth_connector_ready(connector_id) else configured_url
             install_ready = bool(install_url)
         output.append(
