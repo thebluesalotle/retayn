@@ -25,8 +25,9 @@ from auth_context import DATA_DIR
 router = APIRouter()
 AUTH_DB_PATH = DATA_DIR / "auth.db"
 COOKIE_NAME = "retayn_session"
-SESSION_SECONDS = 60 * 60 * 24 * 30
+SESSION_SECONDS = 60 * 60 * 24 * max(1, int(os.getenv("RETAYN_SESSION_DAYS", "180")))
 OAUTH_STATE_SECONDS = 10 * 60
+SIGNED_COOKIE_VERSION = "v1"
 
 
 def utc_now() -> str:
@@ -98,6 +99,59 @@ def _token_hash(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def _session_signing_key() -> bytes:
+    secret = (
+        os.getenv("RETAYN_SESSION_SECRET", "").strip()
+        or os.getenv("RETAYN_TOKEN_ENCRYPTION_KEY", "").strip()
+        or os.getenv("GOOGLE_AUTH_CLIENT_SECRET", "").strip()
+    )
+    if not secret:
+        secret = "retayn-local-development-session-secret"
+    return hashlib.sha256(secret.encode("utf-8")).digest()
+
+
+def _b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def _b64url_decode(value: str) -> bytes:
+    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+
+
+def _sign_session_payload(payload: dict) -> str:
+    body = _b64url(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8"))
+    signature = hmac.new(_session_signing_key(), body.encode("ascii"), hashlib.sha256).digest()
+    return f"{SIGNED_COOKIE_VERSION}.{body}.{_b64url(signature)}"
+
+
+def _read_signed_session(raw_token: str, now: int) -> dict | None:
+    parts = raw_token.split(".")
+    if len(parts) != 3 or parts[0] != SIGNED_COOKIE_VERSION:
+        return None
+    expected = _b64url(hmac.new(_session_signing_key(), parts[1].encode("ascii"), hashlib.sha256).digest())
+    if not hmac.compare_digest(expected, parts[2]):
+        return None
+    try:
+        payload = json.loads(_b64url_decode(parts[1]).decode("utf-8"))
+    except Exception:
+        return None
+    if int(payload.get("expires_at") or 0) < now:
+        return None
+    user_id = str(payload.get("id") or "")
+    email = str(payload.get("email") or "")
+    csrf = str(payload.get("csrf_token") or "")
+    if not user_id or not email or not csrf:
+        return None
+    return {
+        "csrf_token": csrf,
+        "expires_at": int(payload["expires_at"]),
+        "id": user_id,
+        "email": email,
+        "name": str(payload.get("name") or ""),
+        "picture": str(payload.get("picture") or ""),
+    }
+
+
 def _safe_return_to(value: str | None) -> str:
     if not value or not value.startswith("/") or value.startswith("//"):
         return "/"
@@ -114,6 +168,9 @@ def current_session(request: Request) -> dict | None:
     if not raw_token:
         return None
     now = int(time.time())
+    signed = _read_signed_session(raw_token, now)
+    if signed:
+        return signed
     with _db() as conn:
         item = conn.execute(
             """
@@ -236,6 +293,7 @@ async def google_callback(request: Request) -> RedirectResponse:
     now_iso = utc_now()
     raw_session = secrets.token_urlsafe(48)
     csrf = secrets.token_urlsafe(32)
+    expires_at = now + SESSION_SECONDS
     with _db() as conn:
         conn.execute(
             """INSERT INTO users(id,email,name,picture,webhook_token,created_at,last_login_at) VALUES(?,?,?,?,?,?,?)
@@ -245,11 +303,22 @@ async def google_callback(request: Request) -> RedirectResponse:
         conn.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
         conn.execute(
             "INSERT INTO sessions VALUES(?,?,?,?,?)",
-            (_token_hash(raw_session), user_id, csrf, now, now + SESSION_SECONDS),
+            (_token_hash(raw_session), user_id, csrf, now, expires_at),
         )
     destination = _safe_return_to(saved["return_to"])
     result = RedirectResponse(destination, status_code=303)
-    result.set_cookie(COOKIE_NAME, raw_session, max_age=SESSION_SECONDS, httponly=True, secure=_cookie_secure(), samesite="lax", path="/")
+    signed_session = _sign_session_payload(
+        {
+            "id": user_id,
+            "email": email,
+            "name": str(claims.get("name", ""))[:200],
+            "picture": str(claims.get("picture", ""))[:1000],
+            "csrf_token": csrf,
+            "created_at": now,
+            "expires_at": expires_at,
+        }
+    )
+    result.set_cookie(COOKIE_NAME, signed_session, max_age=SESSION_SECONDS, httponly=True, secure=_cookie_secure(), samesite="lax", path="/")
     return result
 
 
