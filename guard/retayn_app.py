@@ -1007,27 +1007,28 @@ def update_account_settings(account_id: int, values: dict[str, Any]) -> dict[str
     previous_allowed = {str(item).strip().casefold() for item in previous.get(identity_key, []) if str(item).strip()}
     next_allowed = {str(item).strip().casefold() for item in cleaned.get(identity_key, previous.get(identity_key, [])) if str(item).strip()}
     removed_allowed = previous_allowed - next_allowed
-    removed_identities = prune_baseline_for_removed_allowed(account, removed_allowed)
+    removed_identities = identities_matching_removed_allowed(account, removed_allowed)
     execute(
         "UPDATE accounts SET settings_json=?, updated_at=? WHERE id=?",
         (json_dumps(existing_values | defaults | cleaned), utc_now(), account_id),
     )
     for identity in removed_identities:
         label = identity_label(identity)
-        unique = f"trusted_identity_removed:{hashlib.sha256((label + utc_now()).encode('utf-8')).hexdigest()[:16]}"
-        create_event(
-            account_id,
-            "trusted_identity_removed",
-            "medium",
-            "Trusted person removed",
-            f"{label} was removed from the trusted list for {account_display(account)}.",
-            {
-                "unique_key": unique,
-                "identity": identity,
-                "removed_from_allowed": True,
-                "supported_action": None,
-            },
-        )
+        unique = f"unallowed_identity_present:{identity_stable_key(identity)}"
+        if not suppressible_event_exists(account_id, "unallowed_identity_present", unique):
+            create_event(
+                account_id,
+                "unallowed_identity_present",
+                "high",
+                "Not-allowed person still has access",
+                f"{label} is no longer allowed in Retayn settings but still appears in {account_display(account)}.",
+                {
+                    "unique_key": unique,
+                    "identity": identity,
+                    "removed_from_allowed": True,
+                    "supported_action": None,
+                },
+            )
     account = row("SELECT * FROM accounts WHERE id=?", (account_id,))
     return get_account_settings(account)
 
@@ -1933,6 +1934,12 @@ def identity_aliases(identity: dict[str, Any]) -> set[str]:
     return {str(item).strip().casefold() for item in aliases if str(item or "").strip()}
 
 
+def identity_stable_key(identity: dict[str, Any]) -> str:
+    aliases = sorted(identity_aliases(identity))
+    source = aliases[0] if aliases else json_dumps(identity)
+    return hashlib.sha256(source.encode("utf-8")).hexdigest()[:16]
+
+
 def identity_allowed(identity: dict[str, Any], allowed: set[str]) -> bool:
     return bool(identity_aliases(identity) & allowed)
 
@@ -1989,21 +1996,16 @@ def update_allowed_identity(account: dict[str, Any], identity: dict[str, Any], a
     )
 
 
-def prune_baseline_for_removed_allowed(account: dict[str, Any], removed_values: set[str]) -> list[dict[str, Any]]:
+def identities_matching_removed_allowed(account: dict[str, Any], removed_values: set[str]) -> list[dict[str, Any]]:
     if not removed_values:
         return []
     snapshot_key = identity_snapshot_key(account)
     baseline = snapshot_get(account["id"], snapshot_key, {})
     removed: list[dict[str, Any]] = []
-    kept: dict[str, Any] = {}
     for key, identity in baseline.items():
         aliases = identity_aliases(identity) | {str(key).casefold()}
         if aliases & removed_values:
             removed.append(identity)
-        else:
-            kept[key] = identity
-    if removed:
-        snapshot_set(account["id"], snapshot_key, kept)
     return removed
 
 
@@ -2015,6 +2017,17 @@ def detect_identity_changes(account: dict[str, Any], before: dict[str, Any], aft
     connector_name = CONNECTORS[account["connector"]]["name"]
     for key, identity in after.items():
         label = identity_label(identity)
+        if key in before and not identity_allowed(identity, allowed) and not identity_inactive(account["connector"], identity):
+            unique = f"unallowed_identity_present:{identity_stable_key(identity)}"
+            if not suppressible_event_exists(account["id"], "unallowed_identity_present", unique):
+                create_event(
+                    account["id"],
+                    "unallowed_identity_present",
+                    "high",
+                    "Not-allowed person still has access",
+                    f"{label} is not on the allowed list but still appears in {account_display(account)}.",
+                    {"unique_key": unique, "identity": identity, "supported_action": None},
+                )
         if key not in before and not identity_allowed(identity, allowed) and not identity_inactive(account["connector"], identity):
             rank = identity_rank(account["connector"], identity)
             unique = f"new_identity:{key}"
@@ -3128,7 +3141,16 @@ async def add_account(request: Request) -> JSONResponse:
         if not parsed:
             raise HTTPException(400, "Enter a repo as owner/name or https://github.com/owner/name.")
         owner, name = parsed
-        gh = await github_client(owner, name)
+        try:
+            gh = await github_client(owner, name)
+        except HTTPException as exc:
+            raise HTTPException(exc.status_code, github_error_message(exc, owner, name)) from exc
+        except Exception as exc:
+            logging.exception("GitHub setup failed before Retayn could verify %s/%s", owner, name)
+            raise HTTPException(
+                400,
+                "Retayn could not start the GitHub connection. Check GITHUB_APP_ID, GITHUB_PRIVATE_KEY_PATH or GITHUB_PRIVATE_KEY, and make sure the private key is valid.",
+            ) from exc
         try:
             await gh.repo(owner, name)
         except HTTPException as exc:
@@ -3196,7 +3218,10 @@ async def add_account(request: Request) -> JSONResponse:
         except Exception as exc:
             logging.exception("GitHub baselining failed for %s/%s", owner, name)
             execute("UPDATE accounts SET status='error', updated_at=? WHERE id=?", (utc_now(), account_id))
-            raise HTTPException(400, f"Retayn could not finish connecting {owner}/{name}. {exc!s}"[:500]) from exc
+            raise HTTPException(
+                400,
+                f"Retayn could not finish connecting {owner}/{name}. Check that the GitHub App is installed on this repo and the GitHub App private key in guard/.env is valid.",
+            ) from exc
     elif connector == "shopify":
         token = await active_connection_token("shopify", owner, "")
         await baseline_shopify(account_id, owner, token["access_token"] if token else cfg["shopify_admin_token"])
