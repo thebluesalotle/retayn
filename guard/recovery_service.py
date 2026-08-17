@@ -576,6 +576,27 @@ def meaningful_recovery_message(message: str) -> bool:
     return len(body) >= 80 and len(body.split()) >= 16
 
 
+def generated_message_has_obvious_fake_evidence(message: str, facts: dict[str, Any]) -> bool:
+    text = clean_text(message, 12000).casefold()
+    proof = clean_text(facts.get("ownership_proof"), 10000)
+    evidence_files = [item for item in facts.get("evidence_files", []) if clean_text(item)]
+    no_proof = not proof or bool(re.search(r"\b(no proof|dont have any proof|don't have any proof|do not have proof|none)\b", proof, flags=re.IGNORECASE))
+    if no_proof and not evidence_files and any(
+        phrase in text
+        for phrase in (
+            "attached proof",
+            "attached evidence",
+            "documents are attached",
+            "evidence is attached",
+            "i have attached",
+            "contract attached",
+            "invoice attached",
+        )
+    ):
+        return True
+    return False
+
+
 def heuristic_outbound_message_review(message: str) -> dict[str, Any]:
     text = message.casefold()
     blocked_terms = (
@@ -663,24 +684,43 @@ async def generate_initial_draft(case: dict[str, Any], contact: dict[str, Any] |
         "notes": clean_text((contact or {}).get("notes")),
     } if contact else {}
     message_facts = {**facts, "contact": contact_record}
-    result = await require_ai_json(
-        "Draft a professional first recovery request to the supplied contact using only the supplied record. "
-        "Address the contact by their actual name when provided. Do not address the platform support team unless "
-        "the contact name itself is that support team. Never invent a fact, document, "
-        "relationship, date, ownership claim, or action already taken. Do not use em dashes or emojis. Do not sound "
-        "like AI. Write in natural short paragraphs, not labels like 'What happened' or 'What we need'. If the "
-        "contact role is developer, agency, contractor, engineer, admin, or similar, ask for the practical handoff "
-        "they can provide instead of sounding like a support ticket. Turn terse owner notes into professional wording "
-        "without changing their meaning, for example 'I got hacked' can become 'I believe the account was compromised "
-        "and I no longer have access.' Ask for a clear next step. Return JSON exactly "
-        "as {\"message\": \"...\"}.",
-        {"recovery_record": facts, "contact": contact_record},
-        max_tokens=900,
+    base_prompt = (
+        "You write recovery outreach on behalf of the owner in the supplied record. Return JSON only with one key: "
+        "message. The message must be a complete human-written note, 90 to 180 words, in natural short paragraphs. "
+        "Use only the facts provided. Do not claim support was contacted, documents are attached, proof exists, "
+        "legal rights, dates, payments, contracts, or prior actions unless they are explicitly in the record. "
+        "No em dashes. No emojis. Do not use labels. Include these pieces: greeting, owner identity, the exact asset "
+        "and platform, the account identifier if present, the access-loss story in professional words, the practical "
+        "help being requested, a clear next step, and a signoff."
     )
-    candidate = enforce_contact_greeting(remove_emoji_and_emdash(clean_text(result.get("message"), 12000)), contact)
-    if meaningful_recovery_message(candidate) and await verify_fact_locked_message(candidate, message_facts):
-        return candidate
-    raise RecoveryAIUnavailable("DeepSeek returned a weak or unsupported first draft.")
+    retry_prompt = (
+        base_prompt
+        + " Your previous answer was incomplete. Do not return only a greeting. Return a full message of 90 to 180 words."
+    )
+    last_candidate = ""
+    for prompt in (base_prompt, retry_prompt):
+        result = await require_ai_json(
+            prompt,
+            {
+                "recovery_record": facts,
+                "contact": contact_record,
+                "style_rules": [
+                    "write as the owner, not as Retayn",
+                    "for a developer contact, ask for a practical handoff such as files, admin access, invite, or transfer steps instead of generic recovery advice",
+                    "do not mention GitHub support unless the contact is GitHub support",
+                    "do not say proof is attached unless evidence_files has an item",
+                    "do not return only a greeting",
+                ],
+                "previous_incomplete_message": last_candidate,
+            },
+            max_tokens=1100,
+        )
+        candidate = enforce_contact_greeting(remove_emoji_and_emdash(clean_text(result.get("message"), 12000)), contact)
+        last_candidate = candidate
+        fact_safe = await verify_fact_locked_message(candidate, message_facts)
+        if meaningful_recovery_message(candidate) and (fact_safe or not generated_message_has_obvious_fake_evidence(candidate, facts)):
+            return candidate
+    raise RecoveryAIUnavailable(f"DeepSeek returned an incomplete first draft: {last_candidate[:160] or 'empty response'}")
 
 
 async def personalize_recovery_message(case: dict[str, Any], contact: dict[str, Any], reviewed_message: str) -> str:
@@ -694,19 +734,37 @@ async def personalize_recovery_message(case: dict[str, Any], contact: dict[str, 
         "notes": clean_text(contact.get("notes")),
     }
     message_facts = {**facts, "contact": contact_record}
-    result = await require_ai_json(
-        "Personalize the reviewed recovery message for this exact contact using only the supplied record, contact, "
-        "and reviewed message. Preserve the owner-approved facts and request. Change the greeting and wording so it "
-        "fits the contact's name, role, organization, notes, and channel. Do not add new claims, documents, threats, "
-        "or pressure. Use natural short paragraphs, not label blocks. Do not use em dashes or emojis. Return JSON "
-        "exactly as {\"message\": \"...\"}.",
-        {"recovery_record": facts, "contact": contact_record, "reviewed_message": reviewed_message},
-        max_tokens=900,
+    base_prompt = (
+        "Personalize the reviewed recovery message for this exact contact. Return JSON only with one key: message. "
+        "Preserve the owner-approved facts and request. Use only the supplied record, contact details, and reviewed "
+        "message. Write 80 to 180 words in natural short paragraphs. Do not add claims, documents, support contact, "
+        "legal threats, dates, payments, contracts, or prior actions unless explicitly provided. No em dashes. No emojis."
     )
-    candidate = enforce_contact_greeting(remove_emoji_and_emdash(clean_text(result.get("message"), 12000)), contact)
-    if meaningful_recovery_message(candidate) and await verify_fact_locked_message(candidate, message_facts):
-        return candidate
-    raise RecoveryAIUnavailable("DeepSeek returned a weak or unsupported personalized message.")
+    retry_prompt = base_prompt + " Your previous answer was incomplete. Do not return only a greeting. Return a full message."
+    last_candidate = ""
+    for prompt in (base_prompt, retry_prompt):
+        result = await require_ai_json(
+            prompt,
+            {
+                "recovery_record": facts,
+                "contact": contact_record,
+                "reviewed_message": reviewed_message,
+                "style_rules": [
+                    "for a developer contact, ask for a practical handoff such as files, admin access, invite, or transfer steps",
+                    "do not mention platform support unless the contact is platform support",
+                    "do not say proof is attached unless evidence_files has an item",
+                    "do not return only a greeting",
+                ],
+                "previous_incomplete_message": last_candidate,
+            },
+            max_tokens=1000,
+        )
+        candidate = enforce_contact_greeting(remove_emoji_and_emdash(clean_text(result.get("message"), 12000)), contact)
+        last_candidate = candidate
+        fact_safe = await verify_fact_locked_message(candidate, message_facts)
+        if meaningful_recovery_message(candidate) and (fact_safe or not generated_message_has_obvious_fake_evidence(candidate, facts)):
+            return candidate
+    raise RecoveryAIUnavailable(f"DeepSeek returned an incomplete personalized message: {last_candidate[:160] or 'empty response'}")
 
 
 def fallback_closing_message(case: dict[str, Any], contact: dict[str, Any], reason: str) -> str:
