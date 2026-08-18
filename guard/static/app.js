@@ -935,10 +935,14 @@ async function recordRecoveryResponse(event, contactId) {
   event.preventDefault();
   const form = event.currentTarget;
   const button = form.querySelector("button[type='submit']");
-  setButtonLoading(button, "Analyzing response...");
+  setButtonLoading(button, "Recording response...");
   try {
     const response = await fetch(`/api/recovery/contacts/${contactId}/responses`, { method: "POST", body: new FormData(form) });
     await refreshRecoveryCaseFromResponse(response);
+    form.reset();
+    setTimeout(() => {
+      if (selectedRecoveryCaseId) loadRecovery();
+    }, 8000);
   } catch (error) {
     alert(error.message);
   } finally {
