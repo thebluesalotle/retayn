@@ -322,7 +322,10 @@ def load_env_file(path: Path) -> None:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
-        os.environ[key.strip()] = value.strip().strip('"').strip("'")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if value and key not in os.environ:
+            os.environ[key] = value
 
 
 def env_bool(name: str, default: bool) -> bool:
@@ -3149,7 +3152,8 @@ async def add_account(request: Request) -> JSONResponse:
             logging.exception("GitHub setup failed before Retayn could verify %s/%s", owner, name)
             raise HTTPException(
                 400,
-                "Retayn could not start the GitHub connection. Check GITHUB_APP_ID, GITHUB_PRIVATE_KEY_PATH or GITHUB_PRIVATE_KEY, and make sure the private key is valid.",
+                "Retayn could not start the GitHub connection. Check GITHUB_APP_ID, GITHUB_PRIVATE_KEY_PATH or "
+                f"GITHUB_PRIVATE_KEY, and make sure the private key is valid. ({type(exc).__name__}: {exc})",
             ) from exc
         try:
             await gh.repo(owner, name)
