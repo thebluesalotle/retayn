@@ -54,6 +54,7 @@ RESPONSE_CLASSIFICATIONS = {
 INBOUND_BATCH_DELAY_SECONDS = 6.0
 _inbound_batch_tokens: dict[int, int] = {}
 _inbound_batch_locks: dict[int, asyncio.Lock] = {}
+_inbound_background_tasks: set[asyncio.Task] = set()
 
 
 class RecoveryAIUnavailable(RuntimeError):
@@ -1644,19 +1645,28 @@ async def process_inbound_message(
         "UPDATE recovery_contacts SET last_response_at=?, updated_at=? WHERE id=?",
         (utc_now(), utc_now(), contact["id"]),
     )
-    return await debounced_finalize_inbound_turn(contact["id"])
+    schedule_inbound_finalize(contact["id"])
+    return get_recovery_case(case["id"])
 
 
-async def debounced_finalize_inbound_turn(contact_id: int, delay: float = INBOUND_BATCH_DELAY_SECONDS) -> dict[str, Any]:
+def schedule_inbound_finalize(contact_id: int) -> None:
+    task = asyncio.create_task(debounced_finalize_inbound_turn(contact_id))
+    _inbound_background_tasks.add(task)
+    task.add_done_callback(_inbound_background_tasks.discard)
+
+
+async def debounced_finalize_inbound_turn(contact_id: int, delay: float = INBOUND_BATCH_DELAY_SECONDS) -> None:
     _inbound_batch_tokens[contact_id] = _inbound_batch_tokens.get(contact_id, 0) + 1
     my_token = _inbound_batch_tokens[contact_id]
     await asyncio.sleep(delay)
     lock = _inbound_batch_locks.setdefault(contact_id, asyncio.Lock())
     async with lock:
         if _inbound_batch_tokens.get(contact_id) != my_token:
-            contact = row("SELECT case_id FROM recovery_contacts WHERE id=?", (contact_id,))
-            return get_recovery_case(contact["case_id"]) if contact else {}
-        return await finalize_inbound_turn(contact_id)
+            return
+        try:
+            await finalize_inbound_turn(contact_id)
+        except Exception:
+            logging.exception("Failed to finalize inbound turn for contact %s", contact_id)
 
 
 async def finalize_inbound_turn(contact_id: int) -> dict[str, Any]:
