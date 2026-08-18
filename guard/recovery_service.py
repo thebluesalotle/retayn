@@ -468,6 +468,13 @@ def parse_ai_json(content: str) -> dict[str, Any] | None:
             continue
         if isinstance(parsed, dict):
             return parsed
+    if start >= 0:
+        try:
+            parsed, _ = json.JSONDecoder().raw_decode(text[start:])
+        except json.JSONDecodeError:
+            return None
+        if isinstance(parsed, dict):
+            return parsed
     return None
 
 
@@ -698,29 +705,36 @@ async def generate_initial_draft(case: dict[str, Any], contact: dict[str, Any] |
         + " Your previous answer was incomplete. Do not return only a greeting. Return a full message of 90 to 180 words."
     )
     last_candidate = ""
+    last_error = ""
     for prompt in (base_prompt, retry_prompt):
-        result = await require_ai_json(
-            prompt,
-            {
-                "recovery_record": facts,
-                "contact": contact_record,
-                "style_rules": [
-                    "write as the owner, not as Retayn",
-                    "for a developer contact, ask for a practical handoff such as files, admin access, invite, or transfer steps instead of generic recovery advice",
-                    "do not mention GitHub support unless the contact is GitHub support",
-                    "do not say proof is attached unless evidence_files has an item",
-                    "do not return only a greeting",
-                ],
-                "previous_incomplete_message": last_candidate,
-            },
-            max_tokens=1100,
-        )
+        try:
+            result = await require_ai_json(
+                prompt,
+                {
+                    "recovery_record": facts,
+                    "contact": contact_record,
+                    "style_rules": [
+                        "write as the owner, not as Retayn",
+                        "for a developer contact, ask for a practical handoff such as files, admin access, invite, or transfer steps instead of generic recovery advice",
+                        "do not mention GitHub support unless the contact is GitHub support",
+                        "do not say proof is attached unless evidence_files has an item",
+                        "do not return only a greeting",
+                    ],
+                    "previous_incomplete_message": last_candidate,
+                },
+                max_tokens=1600,
+            )
+        except RecoveryAIUnavailable as exc:
+            last_error = str(exc)
+            continue
         candidate = enforce_contact_greeting(remove_emoji_and_emdash(clean_text(result.get("message"), 12000)), contact)
         last_candidate = candidate
         fact_safe = await verify_fact_locked_message(candidate, message_facts)
         if meaningful_recovery_message(candidate) and (fact_safe or not generated_message_has_obvious_fake_evidence(candidate, facts)):
             return candidate
-    raise RecoveryAIUnavailable(f"DeepSeek returned an incomplete first draft: {last_candidate[:160] or 'empty response'}")
+    raise RecoveryAIUnavailable(
+        f"DeepSeek returned an incomplete first draft: {last_candidate[:160] or last_error or 'empty response'}"
+    )
 
 
 async def personalize_recovery_message(case: dict[str, Any], contact: dict[str, Any], reviewed_message: str) -> str:
@@ -742,29 +756,36 @@ async def personalize_recovery_message(case: dict[str, Any], contact: dict[str, 
     )
     retry_prompt = base_prompt + " Your previous answer was incomplete. Do not return only a greeting. Return a full message."
     last_candidate = ""
+    last_error = ""
     for prompt in (base_prompt, retry_prompt):
-        result = await require_ai_json(
-            prompt,
-            {
-                "recovery_record": facts,
-                "contact": contact_record,
-                "reviewed_message": reviewed_message,
-                "style_rules": [
-                    "for a developer contact, ask for a practical handoff such as files, admin access, invite, or transfer steps",
-                    "do not mention platform support unless the contact is platform support",
-                    "do not say proof is attached unless evidence_files has an item",
-                    "do not return only a greeting",
-                ],
-                "previous_incomplete_message": last_candidate,
-            },
-            max_tokens=1000,
-        )
+        try:
+            result = await require_ai_json(
+                prompt,
+                {
+                    "recovery_record": facts,
+                    "contact": contact_record,
+                    "reviewed_message": reviewed_message,
+                    "style_rules": [
+                        "for a developer contact, ask for a practical handoff such as files, admin access, invite, or transfer steps",
+                        "do not mention platform support unless the contact is platform support",
+                        "do not say proof is attached unless evidence_files has an item",
+                        "do not return only a greeting",
+                    ],
+                    "previous_incomplete_message": last_candidate,
+                },
+                max_tokens=1400,
+            )
+        except RecoveryAIUnavailable as exc:
+            last_error = str(exc)
+            continue
         candidate = enforce_contact_greeting(remove_emoji_and_emdash(clean_text(result.get("message"), 12000)), contact)
         last_candidate = candidate
         fact_safe = await verify_fact_locked_message(candidate, message_facts)
         if meaningful_recovery_message(candidate) and (fact_safe or not generated_message_has_obvious_fake_evidence(candidate, facts)):
             return candidate
-    raise RecoveryAIUnavailable(f"DeepSeek returned an incomplete personalized message: {last_candidate[:160] or 'empty response'}")
+    raise RecoveryAIUnavailable(
+        f"DeepSeek returned an incomplete personalized message: {last_candidate[:160] or last_error or 'empty response'}"
+    )
 
 
 def fallback_closing_message(case: dict[str, Any], contact: dict[str, Any], reason: str) -> str:
