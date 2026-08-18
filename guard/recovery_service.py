@@ -51,6 +51,9 @@ RESPONSE_CLASSIFICATIONS = {
     "rejection",
     "other",
 }
+INBOUND_BATCH_DELAY_SECONDS = 6.0
+_inbound_batch_tokens: dict[int, int] = {}
+_inbound_batch_locks: dict[int, asyncio.Lock] = {}
 
 
 class RecoveryAIUnavailable(RuntimeError):
@@ -1010,14 +1013,17 @@ async def classify_response(body: str, has_files: bool = False) -> str:
     return classification if classification in RESPONSE_CLASSIFICATIONS else heuristic
 
 
-async def generate_generic_followup(case: dict[str, Any], incoming: str) -> str:
+async def generate_generic_followup(case: dict[str, Any], incoming: str, history: list[dict[str, str]] | None = None) -> str:
     facts = case_fact_record(case)
     result = await require_ai_json(
         "Write one concise professional follow-up to the contact's routine response. Use only facts in the recovery "
-        "record and the incoming message. Never claim an action happened unless it is in the record. Do not use em "
+        "record and the incoming message. conversation_history is the recent thread with this contact, oldest "
+        "first, 'you' is your own prior messages and 'contact' is theirs; use it to understand what a short reply "
+        "like 'yes' or 'that you are the owner' is responding to, and never mistake the contact's words for your "
+        "own. Never claim an action happened unless it is in the record. Do not use em "
         "dashes or emojis. If the contact says they are checking or looking into it, respond naturally with a short "
         "acknowledgement and ask them to let us know what they find. Return JSON exactly as {\"message\": \"...\"}.",
-        {"recovery_record": facts, "incoming_message": incoming},
+        {"recovery_record": facts, "incoming_message": incoming, "conversation_history": history or []},
         max_tokens=500,
     )
     candidate = remove_emoji_and_emdash(clean_text(result.get("message"), 5000))
@@ -1044,17 +1050,22 @@ def routine_acknowledgement(body: str) -> bool:
     )
 
 
-async def generate_recovery_followup(case: dict[str, Any], incoming: str, purpose: str) -> str:
+async def generate_recovery_followup(
+    case: dict[str, Any], incoming: str, purpose: str, history: list[dict[str, str]] | None = None
+) -> str:
     facts = case_fact_record(case)
     result = await require_ai_json(
         "Write a concise professional recovery follow-up using only the supplied record and incoming message. "
+        "conversation_history is the recent thread with this contact, oldest first, 'you' is your own prior "
+        "messages and 'contact' is theirs; use it to understand what a short or fragmentary reply is actually "
+        "responding to, and never mistake the contact's own words for something you said or asked. "
         "Do not invent proof, documents, access, actions, or claims. If the contact asks what account to restore or "
         "invite, provide the account identifier from the record directly. If the contact asks for basic known facts "
         "such as owner name, owner email, business name, platform, repository, or recovery goal, answer directly "
         "from the record. If the owner said there is no proof, do not pretend proof exists. Ask for the next "
         "verification step instead. Use natural paragraphs, not labels. "
         "No em dashes or emojis. Return JSON exactly as {\"message\":\"...\"}.",
-        {"recovery_record": facts, "incoming_message": incoming, "purpose": purpose},
+        {"recovery_record": facts, "incoming_message": incoming, "purpose": purpose, "conversation_history": history or []},
         max_tokens=650,
     )
     candidate = remove_emoji_and_emdash(clean_text(result.get("message"), 5000))
@@ -1551,6 +1562,22 @@ async def sync_telegram_mtproto_responses(limit_per_contact: int = 8) -> dict[st
     return {"ok": not errors, "synced": synced, "message": f"Synced {synced} Telegram message(s).", "errors": errors}
 
 
+def conversation_history(case_id: int, contact_id: int, limit: int = 12) -> list[dict[str, str]]:
+    recent = rows(
+        """
+        SELECT direction, body FROM recovery_messages
+        WHERE case_id=? AND contact_id=? AND body IS NOT NULL AND body != ''
+        ORDER BY created_at DESC LIMIT ?
+        """,
+        (case_id, contact_id, limit),
+    )
+    recent.reverse()
+    return [
+        {"from": "contact" if item["direction"] == "inbound" else "you", "text": clean_text(item["body"], 2000)}
+        for item in recent
+    ]
+
+
 def insert_message(
     case_id: int,
     contact_id: int,
@@ -1607,49 +1634,90 @@ async def process_inbound_message(
     if not case:
         raise HTTPException(404, "Recovery case not found.")
     received_files = received_files or []
-    classification = await classify_response(body, bool(received_files))
     message_id = insert_message(
         case["id"], contact["id"], "inbound", "contact", body or "A file was received.", "received",
-        classification=classification, external_id=external_id,
+        classification=None, external_id=external_id,
     )
-    saved_files = []
     for name, content_type, content in received_files:
-        saved = attach_existing_bytes(case["id"], contact["id"], message_id, name, content_type, content)
-        if saved:
-            saved_files.append(saved)
+        attach_existing_bytes(case["id"], contact["id"], message_id, name, content_type, content)
+    execute(
+        "UPDATE recovery_contacts SET last_response_at=?, updated_at=? WHERE id=?",
+        (utc_now(), utc_now(), contact["id"]),
+    )
+    return await debounced_finalize_inbound_turn(contact["id"])
+
+
+async def debounced_finalize_inbound_turn(contact_id: int, delay: float = INBOUND_BATCH_DELAY_SECONDS) -> dict[str, Any]:
+    _inbound_batch_tokens[contact_id] = _inbound_batch_tokens.get(contact_id, 0) + 1
+    my_token = _inbound_batch_tokens[contact_id]
+    await asyncio.sleep(delay)
+    lock = _inbound_batch_locks.setdefault(contact_id, asyncio.Lock())
+    async with lock:
+        if _inbound_batch_tokens.get(contact_id) != my_token:
+            contact = row("SELECT case_id FROM recovery_contacts WHERE id=?", (contact_id,))
+            return get_recovery_case(contact["case_id"]) if contact else {}
+        return await finalize_inbound_turn(contact_id)
+
+
+async def finalize_inbound_turn(contact_id: int) -> dict[str, Any]:
+    contact = row("SELECT * FROM recovery_contacts WHERE id=?", (contact_id,))
+    if not contact:
+        raise HTTPException(404, "Recovery contact not found.")
+    case = row("SELECT * FROM recovery_cases WHERE id=?", (contact["case_id"],))
+    if not case:
+        raise HTTPException(404, "Recovery case not found.")
+    pending = rows(
+        """
+        SELECT id, body FROM recovery_messages
+        WHERE contact_id=? AND direction='inbound' AND classification IS NULL
+        ORDER BY created_at ASC
+        """,
+        (contact_id,),
+    )
+    if not pending:
+        return get_recovery_case(case["id"])
+    pending_ids = [item["id"] for item in pending]
+    body = "\n".join(clean_text(item["body"], 4000) for item in pending if clean_text(item["body"]))
+    last_message_id = pending_ids[-1]
+    saved_files = rows(
+        f"SELECT * FROM recovery_files WHERE message_id IN ({','.join('?' * len(pending_ids))})",
+        tuple(pending_ids),
+    )
+    has_files = bool(saved_files)
+    classification = await classify_response(body, has_files)
+    execute(
+        f"UPDATE recovery_messages SET classification=? WHERE id IN ({','.join('?' * len(pending_ids))})",
+        (classification, *pending_ids),
+    )
+    history = conversation_history(case["id"], contact_id)
     contact_status = "responded"
     case_status = case["status"]
     if classification == "proof_request":
         contact_status = "needs_info"
         case_status = "needs_owner"
-        try:
-            draft = await generate_recovery_followup(case, body, "proof_request")
-            insert_message(case["id"], contact["id"], "outbound", "agent", draft, "draft", classification="proof_response")
-        except RecoveryAIUnavailable:
-            create_recovery_ai_review_event(case, contact, message_id, body)
         create_recovery_event(
             case["id"], "recovery_proof_requested", "high", "More recovery proof is needed",
-            f"{contact['name']} asked for more ownership evidence in {case['title']}.",
-            {"contact_id": contact["id"], "message_id": message_id, "contact_name": contact["name"], "incoming_message": body},
+            f"{contact['name']} asked for more ownership evidence in {case['title']}. Attach proof, then generate a reply.",
+            {"contact_id": contact["id"], "message_id": last_message_id, "contact_name": contact["name"], "incoming_message": body},
         )
     elif classification == "account_info_request":
         contact_status = "responded"
         case_status = "outreach_active"
         try:
-            followup = await generate_recovery_followup(case, body, "account_info_request")
+            followup = await generate_recovery_followup(case, body, "account_info_request", history)
             await send_and_record(case, contact, followup, sender_type="agent", initial=False)
         except RecoveryAIUnavailable:
             case_status = "needs_owner"
-            create_recovery_ai_review_event(case, contact, message_id, body)
+            create_recovery_ai_review_event(case, contact, last_message_id, body)
     elif classification == "case_fact_request":
         contact_status = "responded"
         case_status = "outreach_active"
         try:
-            followup = await generate_recovery_followup(case, body, "case_fact_request")
+            followup = await generate_recovery_followup(case, body, "case_fact_request", history)
             await send_and_record(case, contact, followup, sender_type="agent", initial=False)
         except RecoveryAIUnavailable:
             case_status = "needs_owner"
-            create_recovery_ai_review_event(case, contact, message_id, body)
+            create_recovery_ai_review_event(case, contact, last_message_id, body)
     elif classification in {"access_offer", "files_shared"}:
         contact_status = "success"
         case_status = "action_required"
@@ -1658,21 +1726,21 @@ async def process_inbound_message(
             summary = f"{contact['name']} sent {len(saved_files)} file(s). They are ready to download in Recover."
         create_recovery_event(
             case["id"], "recovery_handoff_ready", "critical", "Recovery handoff is ready", summary,
-            {"contact_id": contact["id"], "message_id": message_id, "contact_name": contact["name"], "incoming_message": body, "file_ids": [item["id"] for item in saved_files]},
+            {"contact_id": contact["id"], "message_id": last_message_id, "contact_name": contact["name"], "incoming_message": body, "file_ids": [item["id"] for item in saved_files]},
         )
     elif classification == "generic" and bool(case.get("auto_reply_generic")) and not contact_has_pending_draft(contact["id"]):
         try:
-            followup = await generate_generic_followup(case, body)
+            followup = await generate_generic_followup(case, body, history)
             await send_and_record(case, contact, followup, sender_type="agent", initial=False)
         except RecoveryAIUnavailable:
             case_status = "needs_owner"
-            create_recovery_ai_review_event(case, contact, message_id, body)
+            create_recovery_ai_review_event(case, contact, last_message_id, body)
     elif classification == "rejection":
         case_status = "needs_owner"
         create_recovery_event(
             case["id"], "recovery_rejected", "high", "A recovery contact declined the request",
             f"{contact['name']} declined or could not complete the recovery request.",
-            {"contact_id": contact["id"], "message_id": message_id, "contact_name": contact["name"], "incoming_message": body},
+            {"contact_id": contact["id"], "message_id": last_message_id, "contact_name": contact["name"], "incoming_message": body},
         )
     execute(
         "UPDATE recovery_contacts SET status=?, last_response_at=?, updated_at=? WHERE id=?",
@@ -1937,6 +2005,35 @@ async def add_recovery_evidence(case_id: int, request: Request) -> JSONResponse:
         await save_upload(upload, case_id, "owner", labels[index] if index < len(labels) else "")
     execute("UPDATE recovery_cases SET updated_at=? WHERE id=?", (utc_now(), case_id))
     return JSONResponse(get_recovery_case(case_id))
+
+
+@router.post("/api/recovery/contacts/{contact_id}/proof-reply")
+async def generate_proof_reply(contact_id: int) -> JSONResponse:
+    contact = row("SELECT * FROM recovery_contacts WHERE id=?", (contact_id,))
+    if not contact:
+        raise HTTPException(404, "Recovery contact not found.")
+    case = row("SELECT * FROM recovery_cases WHERE id=?", (contact["case_id"],))
+    if not case:
+        raise HTTPException(404, "Recovery case not found.")
+    facts = case_fact_record(case)
+    if not facts["evidence_files"] and not clean_text(facts["ownership_proof"]):
+        raise HTTPException(400, "Attach proof for this case before generating a reply.")
+    last_request = row(
+        """
+        SELECT body FROM recovery_messages
+        WHERE contact_id=? AND direction='inbound' AND classification='proof_request'
+        ORDER BY created_at DESC LIMIT 1
+        """,
+        (contact_id,),
+    )
+    incoming = clean_text((last_request or {}).get("body")) or "The contact asked for more ownership evidence."
+    history = conversation_history(case["id"], contact_id)
+    try:
+        draft = await generate_recovery_followup(case, incoming, "proof_request", history)
+    except RecoveryAIUnavailable as exc:
+        raise HTTPException(503, str(exc)) from exc
+    insert_message(case["id"], contact["id"], "outbound", "agent", draft, "draft", classification="proof_response")
+    return JSONResponse(get_recovery_case(case["id"]))
 
 
 @router.get("/api/recovery/files/{file_id}/download")

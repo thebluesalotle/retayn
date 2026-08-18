@@ -1296,15 +1296,22 @@ def github_app_ready() -> bool:
     )
 
 
+def normalize_pem(raw: str) -> bytes:
+    text = raw.replace("\\r\\n", "\n").replace("\\n", "\n")
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = text.strip("﻿").strip() + "\n"
+    return text.encode("utf-8")
+
+
 def load_github_private_key() -> bytes:
     cfg = config()
     if cfg["github_private_key"]:
-        return cfg["github_private_key"].replace("\\n", "\n").encode("utf-8")
+        return normalize_pem(cfg["github_private_key"])
     if cfg["github_private_key_path"]:
         key_path = Path(cfg["github_private_key_path"])
         if not key_path.is_absolute():
             key_path = BASE_DIR / key_path
-        return key_path.read_bytes()
+        return normalize_pem(key_path.read_bytes().decode("utf-8"))
     raise HTTPException(400, "Set GITHUB_PRIVATE_KEY_PATH or GITHUB_PRIVATE_KEY in guard/.env.")
 
 

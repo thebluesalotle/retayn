@@ -627,6 +627,7 @@ function recoveryConversationMarkup(caseItem, contact) {
       <div><span class="section-label">${escapeHtml(contact.channel)}</span><h3>${escapeHtml(contact.name)}</h3><p>${escapeHtml(contact.organization || contact.address)}</p></div>
       <span class="status-pill ${["needs_info", "failed"].includes(contact.status) ? "danger" : ""}">${escapeHtml(recoveryStatusLabel(contact.status))}</span>
     </div>
+    ${contact.status === "needs_info" ? `<div class="proof-reply-prompt panel-note"><p>${escapeHtml(contact.name)} asked for more ownership proof. Attach it in the evidence locker below, then generate a reply that references it.</p><button type="button" onclick="generateProofReply(event, ${contact.id})">Generate reply with proof</button></div>` : ""}
     <div class="conversation-timeline">${messages.length ? messages.map(recoveryMessageMarkup).join("") : '<p class="empty">No messages recorded yet.</p>'}</div>
     <form class="conversation-compose" onsubmit="sendRecoveryReply(event, ${contact.id})">
       <label>Send a reviewed reply<textarea name="message" rows="4" placeholder="Write a factual reply..."></textarea></label>
@@ -909,6 +910,19 @@ async function uploadRecoveryEvidence(event, caseId) {
   setButtonLoading(button, "Uploading...");
   try {
     const response = await fetch(`/api/recovery/cases/${caseId}/evidence`, { method: "POST", body: formDataWithEvidenceRows(form) });
+    await refreshRecoveryCaseFromResponse(response);
+  } catch (error) {
+    alert(error.message);
+  } finally {
+    clearButtonLoading(button);
+  }
+}
+
+async function generateProofReply(event, contactId) {
+  const button = event.currentTarget;
+  setButtonLoading(button, "Generating reply...");
+  try {
+    const response = await fetch(`/api/recovery/contacts/${contactId}/proof-reply`, { method: "POST" });
     await refreshRecoveryCaseFromResponse(response);
   } catch (error) {
     alert(error.message);
