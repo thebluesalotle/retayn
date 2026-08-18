@@ -518,6 +518,39 @@ strong {
   display: none !important;
 }
 
+.prototype-notice-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(7, 19, 29, 0.72);
+}
+
+.prototype-notice {
+  max-width: 420px;
+  width: 100%;
+  background: var(--panel);
+  border-radius: 14px;
+  padding: 26px;
+  box-shadow: var(--shadow);
+}
+
+.prototype-notice h2 {
+  margin: 0 0 10px;
+}
+
+.prototype-notice p {
+  margin: 0 0 20px;
+  color: var(--muted);
+}
+
+.prototype-notice button {
+  width: 100%;
+}
+
 .system-warning {
   margin-bottom: 14px;
   padding: 13px 15px;

@@ -30,6 +30,7 @@ let evidenceRowId = 0;
 let browserNotificationPermissionAsked = false;
 let notifiedEventIds = new Set();
 const dashboardBackupKey = "retayn_guard_dashboard_backup_v1";
+const prototypeNoticeSeenKey = "retayn_guard_prototype_notice_seen_v1";
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -118,11 +119,30 @@ function writeDashboardBackup(data) {
   }
 }
 
+function accountStatusLabel(status) {
+  return status === "local_only" ? "Not synced" : status;
+}
+
+function removeAccountFromDashboardBackup(accountId) {
+  const backup = readDashboardBackup();
+  if (!backup) return;
+  const accounts = (backup.accounts || []).filter((account) => account.id !== accountId);
+  try {
+    if (!accounts.length && !(backup.assets || []).length) {
+      localStorage.removeItem(dashboardBackupKey);
+    } else {
+      localStorage.setItem(dashboardBackupKey, JSON.stringify({ ...backup, accounts }));
+    }
+  } catch (error) {
+    console.debug("Could not update Retayn browser backup", error);
+  }
+}
+
 function localProtectionMap(categories, accounts, assets) {
   const categoryRows = (categories || []).map((category) => {
     const connections = (accounts || [])
       .filter((account) => (account.categories || []).includes(category.id))
-      .map((account) => ({ provider: connectorName(account), name: accountName(account), status: account.status || "remembered" }));
+      .map((account) => ({ provider: connectorName(account), name: accountName(account), status: account.status || "local_only" }));
     const trackedAssets = (assets || []).filter((asset) => asset.category === category.id);
     const covered = connections.length + trackedAssets.length;
     return {
@@ -152,7 +172,7 @@ function applyDashboardBackup(data) {
   if (!backup || (!(backup.accounts || []).length && !(backup.assets || []).length)) return data;
   const accounts = (backup.accounts || []).map((account) => ({
     ...account,
-    status: "remembered",
+    status: "local_only",
     local_only: true,
   }));
   const assets = backup.assets || [];
@@ -168,10 +188,10 @@ function applyDashboardBackup(data) {
       has_systems: protection.has_systems,
       security_score: protection.score,
       coverage: `${protection.covered}/${protection.total}`,
-      overall_security: "remembered",
+      overall_security: "Not synced",
     },
     browser_backup: {
-      restored: true,
+      loaded_from_browser: true,
       saved_at: backup.saved_at,
     },
   };
@@ -1030,9 +1050,9 @@ function renderAccounts(accounts) {
       <span class="account-provider" aria-hidden="true">${escapeHtml(connectorMonogram(account))}</span>
       <div class="account-main">
         <strong>${escapeHtml(accountName(account))}</strong>
-        <small>${escapeHtml(connectorName(account))} &middot; ${escapeHtml(account.status)}</small>
+        <small>${escapeHtml(connectorName(account))} &middot; ${escapeHtml(accountStatusLabel(account.status))}</small>
       </div>
-      <span class="connection-dot ${account.status === "error" ? "error" : ""}" title="${escapeHtml(account.status)}"></span>
+      <span class="connection-dot ${account.status === "error" ? "error" : ""}" title="${escapeHtml(accountStatusLabel(account.status))}"></span>
     </div>
   `).join("");
 }
@@ -1047,7 +1067,7 @@ function renderManageApps(accounts) {
   target.innerHTML = accounts.map((account) => `
     <button class="manage-row ${account.id === selectedAccountId ? "active" : ""}" onclick="selectAccount(${account.id})">
       <span class="manage-app-copy"><strong>${escapeHtml(accountName(account))}</strong><small>${escapeHtml(connectorName(account))}</small></span>
-      <small class="manage-status">${escapeHtml(account.status)}</small>
+      <small class="manage-status">${escapeHtml(accountStatusLabel(account.status))}</small>
     </button>
   `).join("");
   if (!selectedAccountId || !accounts.some((account) => account.id === selectedAccountId)) {
@@ -1073,9 +1093,9 @@ function renderAccountDetail(account) {
   target.innerHTML = `
     <div class="panel-head">
       <h2>${escapeHtml(accountName(account))}</h2>
-      <span class="status-pill ${account.status === "error" ? "danger" : ""}">${escapeHtml(account.status)}</span>
+      <span class="status-pill ${account.status === "error" ? "danger" : ""}">${escapeHtml(accountStatusLabel(account.status))}</span>
     </div>
-    ${localOnly ? `<div class="system-warning compact-warning"><strong>Browser backup only</strong>This app record was remembered by your browser after the backend data reset. Reconnect it to resume live monitoring.</div>` : ""}
+    ${localOnly ? `<div class="system-warning compact-warning"><strong>Backend data is missing</strong>This app record only exists in this browser's local copy. Reconnect it to resume live monitoring, or remove it.</div><div class="settings-actions"><button type="button" class="danger" onclick="deleteAccount(event, ${account.id})">Delete</button></div>` : ""}
     <div class="monitoring-summary">
       <div><strong>${escapeHtml(connectorName(account))}</strong><div class="capability-list">${monitoringList || "Connection health"}</div></div>
       <small>Last check: ${escapeHtml(lastScan.at || account.updated_at || "Not yet checked")}</small>
@@ -1432,8 +1452,8 @@ async function loadOverview() {
   data = applyDashboardBackup(data);
   lastData = data;
   const persistenceWarning = $("#persistenceWarning");
-  if (data.browser_backup?.restored) {
-    persistenceWarning.innerHTML = `<strong>Restored from this browser</strong>${escapeHtml(`These app records were restored from this browser's backup from ${data.browser_backup.saved_at || "earlier"}. Live monitoring and OAuth tokens need a persistent backend or reconnection.`)}`;
+  if (data.browser_backup?.loaded_from_browser) {
+    persistenceWarning.innerHTML = `<strong>Backend data is missing</strong>${escapeHtml(`These app records only exist in this browser's local copy from ${data.browser_backup.saved_at || "earlier"}. Live monitoring and OAuth tokens need a persistent backend or reconnection. You can remove any of them below.`)}`;
     persistenceWarning.classList.remove("hidden");
   } else if (data.persistence?.risky) {
     persistenceWarning.innerHTML = `<strong>Storage is not persistent</strong>${escapeHtml(data.persistence.message || "Retayn data may be reset after deploy.")}`;
@@ -1567,7 +1587,14 @@ async function deleteAccount(event, accountId) {
   selectedAccountId = null;
   if (button) setButtonLoading(button, "Deleting...");
   try {
+    const account = (lastData?.accounts || []).find((item) => item.id === accountId);
+    if (account?.local_only) {
+      removeAccountFromDashboardBackup(accountId);
+      await loadOverview();
+      return;
+    }
     const payload = await postAction(`/api/accounts/${accountId}/delete`);
+    removeAccountFromDashboardBackup(accountId);
     if (payload.manual_disconnect?.message) {
       alert(payload.manual_disconnect.message);
     }
@@ -1638,6 +1665,22 @@ $("#mobileScrim").addEventListener("click", () => {
 if ($("#recoveryEvidenceFiles")) {
   $("#recoveryEvidenceFiles").innerHTML = evidenceFileRow();
 }
+
+try {
+  if (!localStorage.getItem(prototypeNoticeSeenKey)) {
+    $("#prototypeNoticeScrim").classList.remove("hidden");
+  }
+} catch (error) {
+  console.debug("Could not read prototype notice state", error);
+}
+$("#prototypeNoticeDismiss").addEventListener("click", () => {
+  $("#prototypeNoticeScrim").classList.add("hidden");
+  try {
+    localStorage.setItem(prototypeNoticeSeenKey, "1");
+  } catch (error) {
+    console.debug("Could not persist prototype notice state", error);
+  }
+});
 
 loadOverview();
 setView(["overview", "recover", "protection", "apps", "connect"].includes(window.location.hash.slice(1)) ? window.location.hash.slice(1) : "overview");
